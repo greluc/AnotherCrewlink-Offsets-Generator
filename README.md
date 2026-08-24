@@ -52,6 +52,21 @@ which ones the loader rewrites, and every one of them becomes a `?`. That is
 what makes the pattern survive ASLR, and it also masks unrelated globals that
 happen to sit inside the pattern.
 
+The broadcast-version pattern is generated the same way, from a different kind
+of anchor. It points at a literal rather than at a type-info slot, so there is
+no metadata object to start from — but `Constants.GetBroadcastVersion` compiles
+to `mov eax, <version>; ret` and `dump.cs` reports its address, so the literal
+is one byte into a known method. That method is tiny and surrounded by padding,
+so the pattern grows *backwards* into what precedes it until it is unique.
+
+This one lives in `lookup.json` rather than in an offsets file, because the
+client reads it before it knows which offsets to fetch — which makes it global
+to every client and every build. So it is not replaced casually: the version is
+established from the dump, and the pattern already in `lookup.json` is kept if
+it still produces that value. Only when it does not is a generated one written
+in, with a note that the older versions in the file need re-checking. Either
+way it is now verified against the metadata on every run, which it never was.
+
 **The base files had drifted three years out of date.** Chains had grown hops
 the old code could not fill — it only ever wrote indices `[0]` and `[1]`, while
 `player.localX` needs four. Field offsets are now read from the dump by class
@@ -141,7 +156,7 @@ The toolchain comes from `rust-toolchain.toml` via the runner's own rustup.
 
 ## Regression testing
 
-Eighty-four tests, none of which need Among Us installed.
+Ninety-five tests, none of which need Among Us installed.
 
 The signature generator is tested end to end against a synthetic PE built in the
 test: several instructions reference the same slot, one is followed by identical
@@ -174,16 +189,19 @@ anyway.
 
 ## Known limits
 
-**The broadcast-version pattern is not generated.** It points at an immediate
-rather than a type-info slot, so there is no metadata anchor to build from. It
-lives in `lookup.json` and still matches 2026.8.18; if a future build recompiles
-the version check it has to be refreshed by hand.
+**The write-path signatures are not generated.** `showModStamp`, `connectFunc`,
+`fixedUpdateFunc`, `modLateUpdate` and `pingMessageString` are hook points for
+shellcode the client writes into the running game, not addresses of anything
+metadata describes — which function to detour, and where inside it, is a
+decision encoded in the pattern itself. They stay in `base/x86.json`.
 
-**The write-path signatures are not generated either.** `showModStamp`,
-`connectFunc`, `fixedUpdateFunc`, `modLateUpdate` and `pingMessageString` point
-at function bodies. They are carried from `base/x86.json`, listed as carried in
-every run report, and only used when `disableWriting` is false — which it is not
-on x86. Two of them no longer match 2026.8.18.
+They are checked, though, and the failure mode is now safe rather than silent:
+with `disableWriting` off, a write-path signature that no longer resolves fails
+the run, because the client would otherwise write shellcode to whatever address
+it produced. With `disableWriting` on — which is the case on x86 — nothing reads
+them, so a stale one is reported as a warning on every run instead of being
+discovered by whoever turns writing back on. Three of the five are stale against
+2026.8.18 today.
 
 **Steam downloading is gone.** The old tool drove a 2022 fork of DepotDownloader
 whose Steam login flow Valve has retired, and scraped a SteamDB page that had to

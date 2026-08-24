@@ -14,7 +14,7 @@
 
 use crate::offsets::{Offsets, Signature, SIGNATURE_RESOLVED};
 use crate::pattern::Pattern;
-use crate::pe::Image;
+use crate::pe::{Arch, Image};
 use crate::scriptjson::TypeInfoTable;
 use crate::siggen::SignatureGenerator;
 
@@ -24,6 +24,10 @@ const MAX_PLAUSIBLE_OFFSET: i64 = 65_536;
 
 pub struct Report {
     pub problems: Vec<String>,
+    /// Things that are not wrong but that a maintainer should see. A stale
+    /// write-path signature is the motivating case: harmless while writing is
+    /// off, and a live hazard the moment it is turned on.
+    pub warnings: Vec<String>,
     pub checks_run: usize,
 }
 
@@ -35,15 +39,18 @@ impl Report {
 
 pub fn validate(offsets: &Offsets, image: &Image, types: &TypeInfoTable) -> Report {
     let mut problems = Vec::new();
+    let mut warnings = Vec::new();
     let mut checks = 0usize;
 
     checks += check_no_sentinels(offsets, &mut problems);
     checks += check_chain_shapes(offsets, &mut problems);
     checks += check_player_struct(offsets, &mut problems);
     checks += check_signatures(offsets, image, types, &mut problems);
+    checks += check_write_path(offsets, image, &mut problems, &mut warnings);
 
     Report {
         problems,
+        warnings,
         checks_run: checks,
     }
 }
@@ -211,6 +218,94 @@ fn check_player_struct(offsets: &Offsets, problems: &mut Vec<String>) -> usize {
         }
     }
     4
+}
+
+/// Checks the signatures the generator cannot produce.
+///
+/// `showModStamp`, `connectFunc`, `fixedUpdateFunc`, `modLateUpdate` and
+/// `pingMessageString` do not point at a type-info slot. They are hook points
+/// for the shellcode `GameReader` writes into the running game, which is why it
+/// computes things like `relativeConnectJMP` and lands five bytes into a
+/// function. Which function to detour and where inside it is a decision encoded
+/// in those patterns, not something metadata can answer, so they are carried
+/// from the base file rather than generated.
+///
+/// What can be checked is whether they still mean anything on this build, and
+/// what happens if they do not:
+///
+///   * with `disableWriting` off, the client patches the game using these
+///     addresses. A signature that does not match resolves to something
+///     arbitrary and the client writes shellcode there. That is a failure.
+///   * with `disableWriting` on, nothing reads them. That is a warning, so the
+///     staleness stays visible instead of being discovered by whoever turns
+///     writing back on.
+fn check_write_path(
+    offsets: &Offsets,
+    image: &Image,
+    problems: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> usize {
+    // GameReader only scans for these inside an `if (!is_64bit)` branch.
+    if image.arch != Arch::X86 {
+        return 0;
+    }
+
+    let entries: [(&str, &Signature); 5] = [
+        ("showModStamp", &offsets.signatures.show_mod_stamp),
+        ("connectFunc", &offsets.signatures.connect_func),
+        ("fixedUpdateFunc", &offsets.signatures.fixed_update_func),
+        ("modLateUpdate", &offsets.signatures.mod_late_update),
+        ("pingMessageString", &offsets.signatures.ping_message_string),
+    ];
+
+    let mut checks = 0;
+    let mut stale = Vec::new();
+
+    for (name, signature) in entries {
+        checks += 1;
+        let matches = signature
+            .sig
+            .as_deref()
+            .and_then(|text| Pattern::parse(text).ok())
+            .map(|pattern| pattern.find_all(image.mapped(), 2).len());
+
+        let usable = match matches {
+            Some(1) => true,
+            // The client takes the first match, so several is not fatal on its
+            // own -- but it is a coin flip, and worth naming.
+            Some(count) if count > 1 => {
+                stale.push(format!("{name} matches more than once"));
+                true
+            }
+            Some(_) => {
+                stale.push(format!("{name} does not match this build"));
+                false
+            }
+            None => {
+                stale.push(format!("{name} is missing or unparseable"));
+                false
+            }
+        };
+
+        if !usable && !offsets.disable_writing {
+            problems.push(format!(
+                "signatures.{name} does not resolve on this build, and disableWriting is \
+                 false. The client patches the running game with this address -- writing \
+                 shellcode to whatever it resolves to instead is not something to ship."
+            ));
+        }
+    }
+
+    if !stale.is_empty() && offsets.disable_writing {
+        warnings.push(format!(
+            "write-path signatures are stale ({}). Harmless while disableWriting is true, \
+             since nothing reads them -- but they have to be refreshed by hand before it is \
+             turned off. They are hook points for injected shellcode and cannot be generated.",
+            stale.join(", ")
+        ));
+    }
+
+    checks
 }
 
 /// Resolves every generated signature the way the client will, and checks it

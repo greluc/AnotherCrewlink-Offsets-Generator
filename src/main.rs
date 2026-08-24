@@ -11,10 +11,12 @@ use acl_offsetgen::generate::{BaseConstants, Generator};
 use acl_offsetgen::il2cpph::HeaderLayout;
 use acl_offsetgen::lookup::{classify_change, ContentChange, Lookup};
 use acl_offsetgen::offsets::Offsets;
+use acl_offsetgen::offsets::Signature;
 use acl_offsetgen::pattern::Pattern;
 use acl_offsetgen::pe::{Arch, Image};
 use acl_offsetgen::report;
 use acl_offsetgen::scriptjson::TypeInfoTable;
+use acl_offsetgen::siggen::SignatureGenerator;
 use acl_offsetgen::tools::Dumper;
 use acl_offsetgen::validate;
 
@@ -286,28 +288,13 @@ fn generate(args: GenerateArgs) -> Result<()> {
         return Err(Error::Validation(validation.problems));
     }
     println!("  {} checks passed", validation.checks_run);
+    for warning in &validation.warnings {
+        println!("  warning: {warning}");
+    }
 
-    // The broadcast-version pattern lives in lookup.json rather than being
-    // generated, because it points at an immediate rather than a type-info slot.
     let lookup_path = out.join("lookup.json");
     let mut lookup = Lookup::load(&lookup_path)?;
-    let broadcast_pattern = match arch {
-        Arch::X86 => &lookup.patterns.x86.broadcast_version,
-        Arch::X64 => &lookup.patterns.x64.broadcast_version,
-    };
-    let pattern = Pattern::parse(
-        broadcast_pattern
-            .sig
-            .as_deref()
-            .ok_or_else(|| Error::malformed("lookup.json has no broadcastVersion signature"))?,
-    )?;
-    let broadcast = read_broadcast_version(
-        &analysed.image,
-        &pattern,
-        broadcast_pattern.pattern_offset.unwrap_or(0),
-        broadcast_pattern.address_offset.unwrap_or(0),
-    )?;
-    println!("\nbroadcast version {broadcast}");
+    let broadcast = resolve_broadcast_pattern(&analysed, &mut lookup)?;
 
     let directory = analysed.version.directory_name();
     let relative = format!("{directory}/offsets.json");
@@ -359,6 +346,96 @@ fn generate(args: GenerateArgs) -> Result<()> {
     Ok(())
 }
 
+/// Establishes the broadcast version, and refreshes the pattern if it is stale.
+///
+/// This one lives in `lookup.json` rather than in an offsets file because the
+/// client reads it *before* it knows which offsets to fetch. That makes it
+/// global: every client uses it for every game build, so replacing it is not
+/// the local change that regenerating an offsets file is.
+///
+/// The policy that follows from that:
+///
+///   * the value is established independently, from `Constants.GetBroadcastVersion`
+///     in the dump, which is ground truth;
+///   * if the pattern already in `lookup.json` produces that value on this
+///     build, it is left alone -- it evidently works, and it may be the only
+///     thing keeping older builds resolvable;
+///   * if it does not, it is replaced with a generated one and the run says so
+///     loudly, because older builds then need re-checking.
+///
+/// Either way the pattern is now verified against the metadata on every run,
+/// which it never was before.
+fn resolve_broadcast_pattern(analysed: &Analysed, lookup: &mut Lookup) -> Result<i32> {
+    let arch = analysed.image.arch;
+    let (method_rva, which) = analysed
+        .dump
+        .find_method("Constants", &["GetBroadcastVersion"])
+        .ok_or_else(|| {
+            Error::malformed(
+                "Constants.GetBroadcastVersion is not in this dump, so the broadcast version \
+                 cannot be established. It was renamed or moved; find its new name before \
+                 trusting anything downstream.",
+            )
+        })?;
+
+    let generated = SignatureGenerator::new(&analysed.image).generate_immediate(method_rva)?;
+    let truth = generated.immediate().ok_or_else(|| {
+        Error::malformed("broadcast-version signature did not resolve to a literal")
+    })?;
+    if truth <= 0 {
+        return Err(Error::malformed(format!(
+            "{which} returns {truth}, which cannot be a broadcast version"
+        )));
+    }
+    println!("\nbroadcast version {truth} (from {which} at 0x{method_rva:X})");
+
+    let existing = match arch {
+        Arch::X86 => lookup.patterns.x86.broadcast_version.clone(),
+        Arch::X64 => lookup.patterns.x64.broadcast_version.clone(),
+    };
+
+    let existing_reads = existing.sig.as_deref().and_then(|text| {
+        let pattern = Pattern::parse(text).ok()?;
+        read_broadcast_version(
+            &analysed.image,
+            &pattern,
+            existing.pattern_offset.unwrap_or(0),
+            existing.address_offset.unwrap_or(0),
+        )
+        .ok()
+    });
+
+    if existing_reads == Some(truth) {
+        println!("  lookup.json pattern still reads it correctly, left untouched");
+        return Ok(truth);
+    }
+
+    let replacement = Signature {
+        sig: Some(generated.pattern.to_string()),
+        pattern_offset: Some(generated.pattern_offset),
+        address_offset: Some(generated.address_offset),
+    };
+    match arch {
+        Arch::X86 => lookup.patterns.x86.broadcast_version = replacement,
+        Arch::X64 => lookup.patterns.x64.broadcast_version = replacement,
+    }
+
+    println!(
+        "  lookup.json pattern for {arch} {} -- replaced with a generated one ({})",
+        match existing_reads {
+            Some(other) => format!("reads {other} instead"),
+            None => "does not match this build".to_string(),
+        },
+        generated.describe()
+    );
+    println!(
+        "  NOTE: this pattern is global. Every client uses it for every build, so check that \
+         the replacement still resolves on the older versions listed in lookup.json before \
+         publishing."
+    );
+    Ok(truth)
+}
+
 fn verify(args: VerifyArgs) -> Result<()> {
     let analysed = analyse(&args.game, &args.work, args.dumper.as_deref(), false)?;
     let text = acl_offsetgen::error::read_to_string_lossy(&args.offsets)?;
@@ -366,6 +443,9 @@ fn verify(args: VerifyArgs) -> Result<()> {
         .map_err(|error| Error::malformed(format!("{}: {error}", args.offsets.display())))?;
 
     let validation = validate::validate(&offsets, &analysed.image, &analysed.types);
+    for warning in &validation.warnings {
+        println!("\nwarning: {warning}");
+    }
     if validation.is_ok() {
         println!(
             "\n{} passes all {} checks against Among Us {} ({})",

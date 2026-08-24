@@ -50,6 +50,9 @@ const MAX_SIGNATURE_BYTES: usize = 96;
 /// How many anchor instructions to try before giving up on a type.
 const MAX_CANDIDATES: usize = 24;
 
+/// Bytes prepended per step when a signature has to grow backwards.
+const BACKWARD_STEP: usize = 4;
+
 /// Cap on match positions collected while probing.
 ///
 /// The growth loop only ever filters this set, so it has to start out complete
@@ -60,13 +63,31 @@ const MAX_CANDIDATES: usize = 24;
 /// of code), so this is a guard against pathology rather than a working limit.
 const MATCH_PROBE_CAP: usize = 2_000_000;
 
+/// What a signature is supposed to point at, and therefore how it is checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expectation {
+    /// A global holding an `Il2CppClass*`. The client turns the field into an
+    /// address (RIP-relative on x64, absolute minus module base on x86).
+    Slot(u64),
+    /// A literal baked into the code. The client reads the field as an `int`
+    /// and uses the value directly -- `findPattern`'s `getLocation` path.
+    Immediate(i32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution {
+    Slot(u64),
+    Immediate(i32),
+}
+
 #[derive(Debug, Clone)]
 pub struct GeneratedSignature {
     pub pattern: Pattern,
     pub pattern_offset: i64,
     pub address_offset: i64,
-    /// RVA the signature resolves to, recomputed with the client's arithmetic.
-    pub resolved_rva: u64,
+    /// What the finished signature actually produced, recomputed with the
+    /// client's arithmetic rather than taken on trust.
+    pub resolves_to: Resolution,
     /// RVA of the anchor instruction, for diagnostics.
     pub anchor_rva: u64,
     pub literal_bytes: usize,
@@ -80,6 +101,13 @@ impl GeneratedSignature {
             self.literal_bytes,
             self.anchor_rva
         )
+    }
+
+    pub fn immediate(&self) -> Option<i32> {
+        match self.resolves_to {
+            Resolution::Immediate(value) => Some(value),
+            Resolution::Slot(_) => None,
+        }
     }
 }
 
@@ -107,7 +135,7 @@ impl<'a> SignatureGenerator<'a> {
         let mut last_error = None;
 
         for anchor in candidates.into_iter().take(MAX_CANDIDATES) {
-            match self.grow(&anchor, slot_rva) {
+            match self.grow(&anchor, Expectation::Slot(slot_rva)) {
                 Ok(signature) => {
                     let better = best
                         .as_ref()
@@ -133,6 +161,54 @@ impl<'a> SignatureGenerator<'a> {
                 ))
             })
         })
+    }
+
+    /// Builds a signature over a 32-bit literal inside a known method.
+    ///
+    /// This is how the broadcast-version pattern is produced. It cannot be
+    /// anchored on a type-info slot -- there is no metadata object involved,
+    /// only a number the compiler baked into the code -- but the method that
+    /// returns it does have an address, and `dump.cs` reports it.
+    /// `Constants.GetBroadcastVersion` compiles to `mov eax, <version>; ret` on
+    /// both architectures, so the literal is one byte into the method.
+    ///
+    /// Such a method is tiny and followed by alignment padding, so the pattern
+    /// almost always has to grow backwards into whatever precedes it; see
+    /// [`Self::grow`].
+    pub fn generate_immediate(&self, method_rva: u64) -> Result<GeneratedSignature> {
+        let start = method_rva as usize;
+        let mut cursor = start;
+
+        // Scan a few instructions rather than only the first: a different
+        // compiler could emit a prologue before loading the constant.
+        for _ in 0..8 {
+            let Some(instruction) = self.decode_at(cursor) else {
+                break;
+            };
+            let length = instruction.len();
+            if length == 0 {
+                break;
+            }
+
+            if let Some(value) = immediate32(&instruction) {
+                let bytes = &self.image.mapped()[cursor..cursor + length];
+                if let Some(field_offset) = find_immediate_field(bytes, length, value) {
+                    let anchor = Anchor {
+                        start: cursor,
+                        length,
+                        field_offset,
+                        quality: 0,
+                    };
+                    return self.grow(&anchor, Expectation::Immediate(value));
+                }
+            }
+            cursor += length;
+        }
+
+        Err(Error::malformed(format!(
+            "the method at 0x{method_rva:X} does not start with an instruction carrying a \
+             32-bit literal, so there is nothing to anchor a signature on"
+        )))
     }
 
     /// Instruction starts whose memory operand points at `slot_rva`.
@@ -246,8 +322,10 @@ impl<'a> SignatureGenerator<'a> {
     }
 
     /// Grows a signature from `anchor` until it matches exactly once.
-    fn grow(&self, anchor: &Anchor, slot_rva: u64) -> Result<GeneratedSignature> {
+    fn grow(&self, anchor: &Anchor, expected: Expectation) -> Result<GeneratedSignature> {
         let mapped = self.image.mapped();
+        let target = describe_expectation(expected);
+
         let mut pattern = Pattern::new(self.mask_instruction(
             anchor.start,
             anchor.length,
@@ -262,73 +340,179 @@ impl<'a> SignatureGenerator<'a> {
                 anchor.start
             )));
         }
+
+        let mut start = anchor.start;
         let mut cursor = anchor.start + anchor.length;
+        let mut field_offset = anchor.field_offset;
 
         while positions.len() != 1 {
             if positions.is_empty() {
                 // Cannot happen -- the anchor itself matches -- but never loop
                 // on a contradiction.
                 return Err(Error::malformed(format!(
-                    "signature for 0x{slot_rva:X} stopped matching its own anchor"
+                    "signature for {target} stopped matching its own anchor"
                 )));
             }
             if pattern.len() >= MAX_SIGNATURE_BYTES {
                 return Err(Error::malformed(format!(
-                    "signature for the slot at 0x{slot_rva:X} was still ambiguous after \
-                     {MAX_SIGNATURE_BYTES} bytes ({} candidate sites remained)",
+                    "signature for {target} was still ambiguous after {MAX_SIGNATURE_BYTES} \
+                     bytes ({} candidate sites remained)",
                     positions.len()
                 )));
             }
 
-            let Some(next) = self.decode_at(cursor) else {
+            // Forward first: appending whole instructions keeps the pattern
+            // readable and leaves patternOffset where it started.
+            let before = positions.len();
+            if let Some(next) = self.decode_at(cursor) {
+                let length = next.len();
+                if length > 0 && cursor + length <= mapped.len() {
+                    for byte in self.mask_instruction(cursor, length, None) {
+                        pattern.push(byte);
+                    }
+                    pattern.retain_matches(mapped, &mut positions);
+                    cursor += length;
+                    if positions.len() < before {
+                        continue;
+                    }
+                    // Appending that instruction ruled nothing out. Carrying on
+                    // forward would spend the whole length budget on bytes the
+                    // other candidates share, so try the other direction.
+                }
+            }
+
+            // Either nothing decodable ahead, or what is ahead does not
+            // distinguish this site from the others. Both are normal for a tiny
+            // function such as `mov eax, imm32; ret` followed by alignment
+            // padding: every other tiny function looks identical from there on.
+            //
+            // Extending backwards is the way out -- the pattern is matched as
+            // bytes, so it need not begin on an instruction boundary -- but it
+            // is only worth it when there is no alternative anchor. Reaching
+            // back past the start of a function couples the signature to
+            // whatever the linker happened to place before it, and for a
+            // type-info slot there are usually dozens of other sites to try
+            // instead. So a slot gives up here and lets the next candidate run;
+            // a literal, which has exactly one anchor, reaches backwards.
+            if !allows_backward_growth(expected) {
                 return Err(Error::malformed(format!(
-                    "signature for the slot at 0x{slot_rva:X} ran into undecodable bytes at \
-                     0x{cursor:X} while still ambiguous"
-                )));
-            };
-            let length = next.len();
-            if length == 0 || cursor + length > mapped.len() {
-                return Err(Error::malformed(format!(
-                    "signature for the slot at 0x{slot_rva:X} ran off the end of the image"
+                    "the anchor at 0x{:X} cannot be made unique by growing forwards \
+                     ({} candidate sites remained)",
+                    anchor.start,
+                    positions.len()
                 )));
             }
 
-            for byte in self.mask_instruction(cursor, length, None) {
-                pattern.push(byte);
+            let step = BACKWARD_STEP.min(start);
+            if step == 0 {
+                return Err(Error::malformed(format!(
+                    "signature for {target} is ambiguous and cannot be extended in either \
+                     direction ({} candidate sites)",
+                    positions.len()
+                )));
             }
-            pattern.retain_matches(mapped, &mut positions);
-            cursor += length;
+            start -= step;
+            field_offset += step;
+            let mut prefix = self.mask_bytes(start, step);
+            prefix.extend(pattern.bytes().iter().copied());
+            pattern = Pattern::new(prefix);
+
+            // Candidate starts move with the pattern; anything that would run
+            // off the front of the image is not a candidate any more.
+            positions = positions
+                .into_iter()
+                .filter_map(|position| position.checked_sub(step))
+                .filter(|position| pattern.matches_at(mapped, *position))
+                .collect();
         }
 
         let match_start = positions[0];
-        let pattern_offset = anchor.field_offset as i64;
-        let address_offset = match self.image.arch {
+        let pattern_offset = field_offset as i64;
+        let address_offset = match expected {
             // The client adds the field value to (match + patternOffset) and
             // then this, so it has to complete the instruction: RIP-relative
             // displacements are measured from the end of the instruction, four
-            // bytes past the start of the displacement.
-            Arch::X64 => 4,
-            // On x86 the client subtracts the module base from the absolute
-            // value instead, so nothing is added.
-            Arch::X86 => 0,
+            // bytes past the start of the displacement. On x86 it subtracts the
+            // module base from the absolute value instead, so nothing is added.
+            Expectation::Slot(_) => match self.image.arch {
+                Arch::X64 => 4,
+                Arch::X86 => 0,
+            },
+            // The immediate is read where it lies, on both architectures.
+            Expectation::Immediate(_) => 0,
         };
 
-        let resolved = self.resolve_like_the_client(match_start, pattern_offset, address_offset)?;
-        if resolved != slot_rva {
-            return Err(Error::malformed(format!(
-                "generated signature resolves to 0x{resolved:X} but the slot is at \
-                 0x{slot_rva:X} -- refusing to emit it"
-            )));
-        }
+        let resolves_to = match expected {
+            Expectation::Slot(slot_rva) => {
+                let resolved =
+                    self.resolve_like_the_client(match_start, pattern_offset, address_offset)?;
+                if resolved != slot_rva {
+                    return Err(Error::malformed(format!(
+                        "generated signature resolves to 0x{resolved:X} but the slot is at \
+                         0x{slot_rva:X} -- refusing to emit it"
+                    )));
+                }
+                Resolution::Slot(resolved)
+            }
+            Expectation::Immediate(value) => {
+                let read = self.read_immediate(match_start, pattern_offset, address_offset)?;
+                if read != value {
+                    return Err(Error::malformed(format!(
+                        "generated signature reads {read} but the immediate is {value} -- \
+                         refusing to emit it"
+                    )));
+                }
+                Resolution::Immediate(read)
+            }
+        };
 
         Ok(GeneratedSignature {
             literal_bytes: pattern.literal_count(),
             pattern,
             pattern_offset,
             address_offset,
-            resolved_rva: resolved,
+            resolves_to,
             anchor_rva: anchor.start as u64,
         })
+    }
+
+    /// The `getLocation` path of `findPattern`: the field is read as an `int`
+    /// at `match + patternOffset + addressOffset` and used as-is.
+    pub fn read_immediate(
+        &self,
+        match_start: usize,
+        pattern_offset: i64,
+        address_offset: i64,
+    ) -> Result<i32> {
+        let location = match_start as i64 + pattern_offset + address_offset;
+        if location < 0 {
+            return Err(Error::malformed(
+                "signature location is before the start of the module",
+            ));
+        }
+        self.image
+            .read_i32(location as usize)
+            .ok_or_else(|| Error::malformed("signature match points outside the image"))
+    }
+
+    /// Raw bytes with relocated ones wildcarded, without decoding.
+    ///
+    /// Used when extending backwards, where instruction boundaries are unknown.
+    /// Relocations are the only thing that has to be masked for correctness --
+    /// they are what the loader rewrites when the module is rebased. Everything
+    /// else is stable for the lifetime of the build the signature was made for.
+    fn mask_bytes(&self, rva: usize, length: usize) -> Vec<Option<u8>> {
+        self.image.mapped()[rva..rva + length]
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| {
+                if self.image.is_relocated(rva + index) {
+                    None
+                } else {
+                    Some(*byte)
+                }
+            })
+            .collect()
     }
 
     /// Reproduces `GameReader.findPattern` exactly, as an independent check.
@@ -473,6 +657,48 @@ fn variable_fields(instruction: &Instruction, bytes: &[u8], rva: usize) -> Vec<(
     }
 
     fields
+}
+
+/// Whether a stuck signature may reach back before its anchor.
+///
+/// Only when there is no second anchor to fall back on. See the comment at the
+/// call site for why that distinction matters.
+fn allows_backward_growth(expected: Expectation) -> bool {
+    match expected {
+        Expectation::Slot(_) => false,
+        Expectation::Immediate(_) => true,
+    }
+}
+
+fn describe_expectation(expected: Expectation) -> String {
+    match expected {
+        Expectation::Slot(rva) => format!("the slot at 0x{rva:X}"),
+        Expectation::Immediate(value) => format!("the literal {value}"),
+    }
+}
+
+/// The 32-bit literal an instruction carries, if it has exactly one.
+fn immediate32(instruction: &Instruction) -> Option<i32> {
+    for index in 0..instruction.op_count() {
+        if instruction.op_kind(index) == OpKind::Immediate32 {
+            return Some(instruction.immediate32() as i32);
+        }
+    }
+    None
+}
+
+/// Byte offset of a literal inside an instruction's encoding.
+///
+/// Searched from the back because immediates are encoded last; an earlier
+/// coincidental match would point at the wrong bytes.
+fn find_immediate_field(bytes: &[u8], length: usize, value: i32) -> Option<usize> {
+    if length < 4 {
+        return None;
+    }
+    let encoded = value.to_le_bytes();
+    (0..=length - 4)
+        .rev()
+        .find(|offset| bytes[*offset..*offset + 4] == encoded)
 }
 
 fn find_relative_field(

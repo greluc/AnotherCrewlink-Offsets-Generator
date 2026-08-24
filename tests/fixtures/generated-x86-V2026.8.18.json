@@ -278,7 +278,7 @@
       "addressOffset": 0
     },
     "palette": {
-      "sig": "A1 ? ? ? ? 7C ? 83 78 74 00 75 ? 50 E8 ? ? ? ? A1 ? ? ? ?",
+      "sig": "A1 ? ? ? ? 83 C4 04 8B 40 5C 0F 10 40 30",
       "patternOffset": 1,
       "addressOffset": 0
     },
@@ -318,7 +318,7 @@
       "addressOffset": 0
     },
     "gameOptionsManager": {
-      "sig": "A1 ? ? ? ? 8B 40 5C 8B 00 85 C0 74 ? 8B 40 20 85 C0 74 ? 50",
+      "sig": "A1 ? ? ? ? 57 8B 40 5C 8B 38 85 FF 74 ?",
       "patternOffset": 1,
       "addressOffset": 0
     }

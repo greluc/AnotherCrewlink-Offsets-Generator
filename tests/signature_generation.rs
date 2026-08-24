@@ -15,7 +15,7 @@
 
 use acl_offsetgen::pattern::Pattern;
 use acl_offsetgen::pe::{Arch, Image};
-use acl_offsetgen::siggen::SignatureGenerator;
+use acl_offsetgen::siggen::{Resolution, SignatureGenerator};
 
 const IMAGE_BASE: u32 = 0x1000_0000;
 const TEXT_RVA: usize = 0x1000;
@@ -142,7 +142,11 @@ fn generates_a_unique_signature_that_resolves_back_to_the_slot() {
     );
 
     // And it resolves to the slot with the client's arithmetic.
-    assert_eq!(generated.resolved_rva, SLOT_RVA as u64);
+    assert_eq!(
+        generated.resolves_to,
+        Resolution::Slot(SLOT_RVA as u64),
+        "the signature must resolve back to the slot it was built from"
+    );
     assert_eq!(
         generated.address_offset, 0,
         "x86 signatures resolve by subtracting the module base, so nothing is added"
@@ -221,6 +225,104 @@ fn an_unrelocated_constant_that_looks_like_the_address_is_not_taken_as_an_anchor
     assert!(SignatureGenerator::new(&image)
         .generate(SLOT_RVA as u64)
         .is_err());
+}
+
+/// `mov eax, imm32`
+fn mov_eax_imm(value: i32) -> Vec<u8> {
+    let mut bytes = vec![0xB8];
+    bytes.extend_from_slice(&value.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn generates_a_signature_over_a_literal_and_reads_it_back() {
+    // The broadcast-version case: a value baked into the code rather than an
+    // address, reached through a method whose RVA the dump reports.
+    const VERSION: i32 = 50_663_350;
+    let mut code = Vec::new();
+    code.extend_from_slice(&[0x90, 0x51, 0x52, 0x53]); // distinguishing prefix
+    let method = TEXT_RVA + code.len();
+    code.extend_from_slice(&mov_eax_imm(VERSION));
+    code.extend_from_slice(&[0xC3]);
+    code.extend_from_slice(&[0xCC; 8]);
+
+    let file = build_pe(&code, &[]);
+    let image = Image::parse(&file).expect("parse");
+    let generated = SignatureGenerator::new(&image)
+        .generate_immediate(method as u64)
+        .expect("generate");
+
+    assert_eq!(generated.resolves_to, Resolution::Immediate(VERSION));
+    assert_eq!(generated.immediate(), Some(VERSION));
+    // The literal is one byte into `mov eax, imm32`, and the client reads it
+    // where it lies rather than turning it into an address.
+    assert_eq!(generated.pattern_offset, 1);
+    assert_eq!(generated.address_offset, 0);
+
+    let matches = generated.pattern.find_all(image.mapped(), 4);
+    assert_eq!(matches.len(), 1);
+    let location = matches[0] + generated.pattern_offset as usize;
+    assert_eq!(image.read_i32(location), Some(VERSION));
+}
+
+#[test]
+fn a_literal_signature_grows_backwards_when_forward_says_nothing() {
+    // Two tiny functions that are byte-identical from the opcode onwards --
+    // only what precedes them differs. Growing forward can never separate
+    // them, so the generator has to extend the other way.
+    let mut code = Vec::new();
+    code.extend_from_slice(&[0x90, 0x90, 0x90, 0x90]); // prefix of the decoy
+    code.extend_from_slice(&mov_eax_imm(1111));
+    code.extend_from_slice(&[0xC3]);
+    code.extend_from_slice(&[0xCC; 4]);
+
+    code.extend_from_slice(&[0x51, 0x52, 0x53, 0x54]); // prefix of the target
+    let method = TEXT_RVA + code.len();
+    code.extend_from_slice(&mov_eax_imm(2222));
+    code.extend_from_slice(&[0xC3]);
+    code.extend_from_slice(&[0xCC; 4]);
+
+    let file = build_pe(&code, &[]);
+    let image = Image::parse(&file).expect("parse");
+    let generated = SignatureGenerator::new(&image)
+        .generate_immediate(method as u64)
+        .expect("a backwards-grown signature should still be possible");
+
+    assert_eq!(generated.resolves_to, Resolution::Immediate(2222));
+    assert!(
+        generated.pattern_offset > 1,
+        "growing backwards has to move the literal further into the pattern, got {}",
+        generated.pattern_offset
+    );
+
+    let matches = generated.pattern.find_all(image.mapped(), 4);
+    assert_eq!(
+        matches.len(),
+        1,
+        "signature '{}' is ambiguous",
+        generated.pattern
+    );
+    let location = matches[0] + generated.pattern_offset as usize;
+    assert_eq!(
+        image.read_i32(location),
+        Some(2222),
+        "the shifted patternOffset must still land on the literal"
+    );
+}
+
+#[test]
+fn a_method_without_a_literal_is_an_error() {
+    let mut code = Vec::new();
+    let method = TEXT_RVA + code.len();
+    code.extend_from_slice(&[0x33, 0xC0]); // xor eax, eax
+    code.extend_from_slice(&[0xC3]);
+
+    let file = build_pe(&code, &[]);
+    let image = Image::parse(&file).expect("parse");
+    let error = SignatureGenerator::new(&image)
+        .generate_immediate(method as u64)
+        .expect_err("nothing to anchor on");
+    assert!(error.to_string().contains("32-bit literal"));
 }
 
 #[test]
