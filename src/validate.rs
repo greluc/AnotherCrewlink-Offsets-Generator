@@ -208,13 +208,33 @@ fn check_player_struct(offsets: &Offsets, problems: &mut Vec<String>) -> usize {
     if player.struct_layout.iter().any(|member| member.size() <= 0) {
         problems.push("player.struct contains a member of zero or negative size".to_string());
     }
-    for required in ["id", "objectPtr", "dead", "outfitsPtr"] {
+    // Every member GameReader looks up by name. `getOffsetByName` returns
+    // undefined for one that is not there, which turns into a NaN address and
+    // a read that quietly yields nothing -- so a file missing one of these
+    // produces no player data at all, without any error.
+    //
+    // This is not hypothetical. Eight files in the offsets repository predate
+    // the switch from GameData.PlayerInfo to NetworkedPlayerInfo and carry the
+    // older layout, with `color`, `hat` and `impostor` as direct members and no
+    // `outfitsPtr` or `rolePtr`. They stayed mapped for years while being
+    // unreadable, because nothing checked the shape.
+    for required in [
+        "id",
+        "outfitsPtr",
+        "rolePtr",
+        "taskPtr",
+        "dead",
+        "objectPtr",
+    ] {
         if !player
             .struct_layout
             .iter()
             .any(|member| member.name == required)
         {
-            problems.push(format!("player.struct is missing '{required}'"));
+            problems.push(format!(
+                "player.struct is missing '{required}', which GameReader reads by name -- \
+                 the client would get no player data from this file"
+            ));
         }
     }
     4
