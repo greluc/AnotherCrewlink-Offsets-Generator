@@ -125,13 +125,22 @@ jobs:
           #
           # --target matters: this job runs on Linux but the tool only ever ships
           # for Windows, so without it the count describes a graph nobody builds.
-          count=$(cargo tree --locked --edges normal --prefix none \
-                    --target x86_64-pc-windows-msvc \
-                  | sed 's/ (\*)$//' | grep -v '^$' | sort -u | wc -l)
-          echo "$count distinct crates in the Windows dependency graph"
-          if [ "$count" -gt 40 ]; then
+          #
+          # Counting crate *names* rather than tree lines, and printing them.
+          # cargo tree's output is host-dependent -- on a Windows host the
+          # proc-macro subtree collapses into "(*)" back-references, on a Linux
+          # host targeting Windows it is spelled out -- so a bare number differs
+          # between the machine you check on and the runner, for no reason worth
+          # anyone's time. The list makes any future surprise self-explaining.
+          mapfile -t crates < <(
+            cargo tree --locked --edges normal --prefix none \
+              --target x86_64-pc-windows-msvc \
+            | awk 'NF { print $1 }' | sort -u
+          )
+          echo "${#crates[@]} distinct crates in the Windows dependency graph:"
+          printf '  %s\n' "${crates[@]}"
+          if [ "${#crates[@]}" -gt 40 ]; then
             echo "Dependency graph grew past the agreed budget of 40 crates." >&2
-            cargo tree --locked --edges normal --target x86_64-pc-windows-msvc >&2
             exit 1
           fi
 

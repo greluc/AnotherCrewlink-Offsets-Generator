@@ -141,7 +141,7 @@ Rust build at all. That keeps `reqwest`, a TLS stack, `zip` and `flate2` out of
 the dependency graph — `deny.toml` bans them by name so they cannot come back as
 a transitive dependency without someone noticing.
 
-**Dependencies:** four direct (`clap`, `serde`, `serde_json`, `iced-x86`), 22
+**Dependencies:** four direct (`clap`, `serde`, `serde_json`, `iced-x86`), 23
 crates in the whole graph, every version pinned with `=`, `Cargo.lock` committed,
 every CI command `--locked`. SHA-256 is vendored in `src/sha256.rs` rather than
 pulled from a crate family, because it is the code that decides whether we are
