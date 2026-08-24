@@ -44,7 +44,8 @@ generator finds one, wildcards everything the loader may rewrite, and grows the
 pattern instruction by instruction until it matches exactly once. Then it
 resolves the finished pattern with the client's own arithmetic and checks it
 lands back on the slot it started from. Nine signatures for Among Us 2026.8.18
-come out between 14 and 24 bytes and take about a second.
+come out between 8 and 30 bytes and take about a second, on both
+architectures.
 
 Which bytes get wildcarded is not guesswork: the PE's own `.reloc` table says
 which ones the loader rewrites, and every one of them becomes a `?`. That is
@@ -140,7 +141,7 @@ The toolchain comes from `rust-toolchain.toml` via the runner's own rustup.
 
 ## Regression testing
 
-Eighty tests, none of which need Among Us installed.
+Eighty-four tests, none of which need Among Us installed.
 
 The signature generator is tested end to end against a synthetic PE built in the
 test: several instructions reference the same slot, one is followed by identical
@@ -150,30 +151,28 @@ tests assert the result is unique, resolves back to the slot, and does not spell
 out a single relocated address.
 
 `tests/fixtures/` holds the hand-written V17.4.0 offsets for both architectures
-and the first file this generator produced. They pin the contract with the
-client: if a key is renamed or changes shape on either side, parsing fails; key
-order is checked too, so a regenerated version shows up as a small diff rather
-than a rewrite of the whole file.
+and the files this generator produced for 2026.8.18. They pin the contract with
+the client: if a key is renamed or changes shape on either side, parsing fails;
+key order is checked too, so a regenerated version shows up as a small diff
+rather than a rewrite of the whole file.
 
-Three differences between the generated file and the hand-written x86 reference
-are pinned as tests, because two of them are defects in the shipping file:
+Where the generated files disagree with the hand-written ones is pinned as
+tests, because most of it is defects in the shipping files:
 
-| field | shipping x86 | generated | why |
+| field | shipping | generated | why |
 |---|---|---|---|
-| `gameoptionsData` | `[-1, 92, 24]` | `[-1, 92, 0, 20]` | the `Instance` dereference is missing; the x64 file has it |
-| `hqHudSystemType_CompletedConsoles` | `[12, 8]` | `[12, 16]` | 8 is `HashSet<T>::_buckets`, the count is at 16; x64 uses 32, the same field |
-| `player.roleTeam` | `[76]` | `[80]` | a real game change — `MaxCount` was inserted before `RoleBehaviour.TeamType` after 17.4.0 |
+| `innerNetClient.gameMode` (x64) | `-1` | `68` | a failed lookup written straight into a published file: the old generator searched for `InnerNetClient.GameMode`, the field is `NetworkMode` |
+| `hqHudSystemType_CompletedConsoles` | `[12, 8]` / `[24, 16]` | `[12, 16]` / `[24, 32]` | that is `HashSet<T>::_buckets`; the count is one pointer further on |
+| `planetSurveillanceMinigame_camarasCount` (x64) | `[216, 12]` | `[216, 24]` | `Il2CppArray::max_length` is 12 on x86 and 24 on x64; the x86 number was carried across |
+| `surveillanceMinigame_FilteredRoomsCount` (x64) | `[168, 12]` | `[168, 24]` | same |
+| `gameoptionsData` (x86) | `[-1, 92, 24]` | `[-1, 92, 0, 20]` | the `Instance` dereference is missing; the x64 file has it |
+| `player.roleTeam` | `[76]` / `[108]` | `[80]` / `[116]` | a real game change — `MaxCount` was inserted before `RoleBehaviour.TeamType` after 17.4.0 |
 
-Everything else — 64 of 68 fields, including the entire player struct layout —
-matches the hand-written reference exactly.
+Everything else matches: 64 of 68 fields on x86 and 53 of 68 on x64, where the
+remaining x64 differences are the slot-0 placeholders the client overwrites
+anyway.
 
 ## Known limits
-
-**x64 is not verified.** Only the 32-bit Steam build was available while this
-was written. The code is architecture-generic and the x64 constants are carried
-from the working hand-written file, but nothing has been generated against an
-Epic or Microsoft Store install. Run `verify` against one before trusting a
-generated x64 file.
 
 **The broadcast-version pattern is not generated.** It points at an immediate
 rather than a type-info slot, so there is no metadata anchor to build from. It

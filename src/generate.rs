@@ -425,8 +425,10 @@ impl<'a> Generator<'a> {
 
         let position_chain = |tail: i64| vec![net_transform, body, cached_ptr, tail];
 
+        let (player_struct, player_buffer_length) = self.player_record();
+
         let player = Player {
-            struct_layout: self.player_struct(),
+            struct_layout: player_struct,
             is_dummy: vec![self.field("player.isDummy", "PlayerControl", &["isDummy"])],
             is_local: vec![
                 cosmetics,
@@ -436,7 +438,7 @@ impl<'a> Generator<'a> {
             local_y: position_chain(native_x + 4),
             remote_x: position_chain(native_x),
             remote_y: position_chain(native_x + 4),
-            buffer_length: self.player_buffer_length(),
+            buffer_length: player_buffer_length,
             offsets: vec![0, 0],
             in_vent: vec![self.field("player.inVent", "PlayerControl", &["inVent"])],
             client_id: vec![self.field("player.clientId", "InnerNetObject", &["OwnerId"])],
@@ -646,67 +648,97 @@ impl<'a> Generator<'a> {
         self.field(&full, "NetworkedPlayerInfo.PlayerOutfit", candidates)
     }
 
-    /// Members of the player record the client parses with `structron`.
+    /// Members of the player record the client parses with `structron`, plus
+    /// the buffer length that goes with them.
     ///
     /// Built by sorting the fields we care about by offset and padding the
     /// gaps, so the layout follows the dump rather than a hand-maintained list
     /// that has to be re-checked every time Innersloth adds a field.
-    fn player_struct(&mut self) -> Vec<StructMember> {
-        let wanted: Vec<(&str, &str, &str)> = vec![
-            ("id", "PlayerId", "UINT"),
-            ("outfitsPtr", "Outfits", "UINT"),
-            ("playerLevel", "PlayerLevel", "UINT"),
-            ("disconnected", "Disconnected", "UINT"),
-            ("rolePtr", "Role", "UINT"),
-            ("taskPtr", "Tasks", "UINT"),
-            ("dead", "IsDead", "BYTE"),
-            ("objectPtr", "_object", "UINT"),
+    ///
+    /// The two results are produced together on purpose. `bufferLength` is how
+    /// many bytes the client copies out of the process before handing them to
+    /// the struct, so if the struct describes more than that it reads past the
+    /// end of its own buffer. Deriving them separately let them disagree by
+    /// four bytes on x64, which the validator caught.
+    fn player_record(&mut self) -> (Vec<StructMember>, i64) {
+        // `pointer` marks the fields that are really object references. They
+        // are declared UINT because the struct entry exists only to give the
+        // client an offset -- GameReader re-reads outfitsPtr, taskPtr and
+        // objectPtr from memory as full pointers rather than using the parsed
+        // value. Their *footprint* in the record is still a whole pointer,
+        // which is what decides where the record ends.
+        let wanted: [(&str, &str, &str, bool); 8] = [
+            ("id", "PlayerId", "UINT", false),
+            ("outfitsPtr", "Outfits", "UINT", true),
+            ("playerLevel", "PlayerLevel", "UINT", false),
+            ("disconnected", "Disconnected", "UINT", false),
+            ("rolePtr", "Role", "UINT", true),
+            ("taskPtr", "Tasks", "UINT", true),
+            ("dead", "IsDead", "BYTE", false),
+            ("objectPtr", "_object", "UINT", true),
         ];
 
-        let mut entries: Vec<(i64, &str, &str)> = Vec::new();
-        for (name, field, kind) in &wanted {
+        let mut entries: Vec<(i64, &str, &str, bool)> = Vec::new();
+        for (name, field, kind, is_pointer) in &wanted {
             let offset = self.field(
                 &format!("player.struct.{name}"),
                 "NetworkedPlayerInfo",
                 &[field],
             );
-            entries.push((offset, name, kind));
+            entries.push((offset, name, kind, *is_pointer));
         }
-        entries.sort_by_key(|(offset, _, _)| *offset);
+        entries.sort_by_key(|(offset, _, _, _)| *offset);
 
-        let mut members = Vec::new();
-        let mut cursor = 0i64;
-        for (offset, name, kind) in entries {
-            if offset > cursor {
-                members.push(StructMember::padding(offset - cursor));
-                cursor = offset;
-            }
-            let member = StructMember::value(kind, name);
-            cursor += member.size();
-            members.push(member);
-        }
-        members
-    }
-
-    fn player_buffer_length(&mut self) -> i64 {
-        let length = self
-            .player_struct_cursor()
-            .unwrap_or_else(|| self.object_header());
         self.provenance.push((
             "player.bufferLength".to_string(),
-            Provenance::Layout("end of the last field read from NetworkedPlayerInfo".to_string()),
+            Provenance::Layout(
+                "end of the last field of NetworkedPlayerInfo, counting object references \
+                 as full pointers"
+                    .to_string(),
+            ),
         ));
-        length
+        build_record(&entries, self.pointer())
+    }
+}
+
+/// Lays out the player record: gaps padded, and padded again at the end so the
+/// members cover the whole record.
+///
+/// Split out from the lookups so it can be tested against both architectures
+/// without a game file. `entries` must be sorted by offset, and the flag marks
+/// fields that are really object references.
+fn build_record(entries: &[(i64, &str, &str, bool)], pointer: i64) -> (Vec<StructMember>, i64) {
+    let mut members = Vec::new();
+    let mut cursor = 0i64;
+    let mut record_end = 0i64;
+
+    for (offset, name, kind, is_pointer) in entries {
+        if *offset > cursor {
+            members.push(StructMember::padding(offset - cursor));
+            cursor = *offset;
+        }
+        let member = StructMember::value(kind, name);
+        let footprint = if *is_pointer { pointer } else { member.size() };
+        record_end = record_end.max(offset + footprint);
+        cursor += member.size();
+        members.push(member);
     }
 
-    fn player_struct_cursor(&self) -> Option<i64> {
-        let last = self.dump.find_field("NetworkedPlayerInfo", &["_object"])?.0;
-        Some(last + self.pointer())
+    // On x64 the last field is a pointer declared as a 4-byte UINT, so the
+    // members stop four bytes short of the record. Pad rather than shorten: the
+    // client copies the whole record out, and the hand-written x64 file uses
+    // the same 136.
+    if record_end > cursor {
+        members.push(StructMember::padding(record_end - cursor));
+        cursor = record_end;
     }
+
+    (members, cursor)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::build_record;
     use crate::offsets::StructMember;
     use crate::pe::Arch;
 
@@ -714,32 +746,35 @@ mod tests {
         StructMember::value(kind, name)
     }
 
-    #[test]
-    fn struct_padding_matches_the_reference_layout() {
-        // Offsets from the real 2026.8.18 x86 dump of NetworkedPlayerInfo.
-        // The expected output is byte-for-byte the hand-written V17.4.0 x86
-        // struct, which is the strongest check available for this routine.
-        let entries: Vec<(i64, &str, &str)> = vec![
-            (40, "id", "UINT"),
-            (64, "outfitsPtr", "UINT"),
-            (68, "playerLevel", "UINT"),
-            (72, "disconnected", "UINT"),
-            (76, "rolePtr", "UINT"),
-            (80, "taskPtr", "UINT"),
-            (84, "dead", "BYTE"),
-            (88, "objectPtr", "UINT"),
-        ];
-        let mut members = Vec::new();
-        let mut cursor = 0i64;
-        for (offset, name, kind) in entries {
-            if offset > cursor {
-                members.push(StructMember::padding(offset - cursor));
-                cursor = offset;
-            }
-            let value = member(kind, name);
-            cursor += value.size();
-            members.push(value);
+    /// `NetworkedPlayerInfo` offsets from the real 2026.8.18 dumps, sorted.
+    fn record_entries(arch: Arch) -> Vec<(i64, &'static str, &'static str, bool)> {
+        match arch {
+            Arch::X86 => vec![
+                (40, "id", "UINT", false),
+                (64, "outfitsPtr", "UINT", true),
+                (68, "playerLevel", "UINT", false),
+                (72, "disconnected", "UINT", false),
+                (76, "rolePtr", "UINT", true),
+                (80, "taskPtr", "UINT", true),
+                (84, "dead", "BYTE", false),
+                (88, "objectPtr", "UINT", true),
+            ],
+            Arch::X64 => vec![
+                (56, "id", "UINT", false),
+                (88, "outfitsPtr", "UINT", true),
+                (96, "playerLevel", "UINT", false),
+                (100, "disconnected", "UINT", false),
+                (104, "rolePtr", "UINT", true),
+                (112, "taskPtr", "UINT", true),
+                (120, "dead", "BYTE", false),
+                (128, "objectPtr", "UINT", true),
+            ],
         }
+    }
+
+    #[test]
+    fn x86_record_matches_the_hand_written_reference_exactly() {
+        let (members, buffer_length) = build_record(&record_entries(Arch::X86), 4);
 
         assert_eq!(members.len(), 11);
         assert_eq!(members[0], StructMember::padding(40));
@@ -748,7 +783,32 @@ mod tests {
         assert_eq!(members[8], member("BYTE", "dead"));
         assert_eq!(members[9], StructMember::padding(3));
         assert_eq!(members[10], member("UINT", "objectPtr"));
-        assert_eq!(cursor, 92, "bufferLength should come out as 92 on x86");
+        assert_eq!(buffer_length, 92);
+    }
+
+    #[test]
+    fn x64_record_covers_the_trailing_pointer() {
+        // The last field is an 8-byte reference declared as a 4-byte UINT, so
+        // without the trailing pad the members would stop at 132 while the
+        // client reads 136 -- which is exactly what the validator caught the
+        // first time this ran against an Epic install.
+        let (members, buffer_length) = build_record(&record_entries(Arch::X64), 8);
+
+        assert_eq!(members[0], StructMember::padding(56));
+        assert_eq!(members[members.len() - 2], member("UINT", "objectPtr"));
+        assert_eq!(members[members.len() - 1], StructMember::padding(4));
+        assert_eq!(buffer_length, 136, "the hand-written x64 file uses 136");
+    }
+
+    #[test]
+    fn members_always_add_up_to_the_buffer_length() {
+        // The invariant validate.rs enforces on the finished file. Checking it
+        // at the source means a future layout change cannot break it silently.
+        for (arch, pointer) in [(Arch::X86, 4), (Arch::X64, 8)] {
+            let (members, buffer_length) = build_record(&record_entries(arch), pointer);
+            let total: i64 = members.iter().map(StructMember::size).sum();
+            assert_eq!(total, buffer_length, "{arch}");
+        }
     }
 
     #[test]

@@ -16,6 +16,7 @@ use acl_offsetgen::validate;
 const REFERENCE_X86: &str = include_str!("fixtures/reference-x86-V17.4.0.json");
 const REFERENCE_X64: &str = include_str!("fixtures/reference-x64-V17.4.0.json");
 const GENERATED_X86: &str = include_str!("fixtures/generated-x86-V2026.8.18.json");
+const GENERATED_X64: &str = include_str!("fixtures/generated-x64-V2026.8.18.json");
 
 fn parse(label: &str, text: &str) -> Offsets {
     serde_json::from_str(text).unwrap_or_else(|error| {
@@ -79,15 +80,36 @@ fn generated_output_keeps_the_key_order_of_the_hand_written_files() {
 }
 
 #[test]
-fn the_golden_generated_file_still_passes_structural_validation() {
+fn the_golden_generated_files_still_pass_structural_validation() {
     // Runs the checks that do not need the game binary. The signature checks
     // are covered by `signature_generation.rs`; this is about shape.
-    let generated = parse("generated x86", GENERATED_X86);
-    let problems = validate::structural_problems(&generated);
-    assert!(
-        problems.is_empty(),
-        "the golden file no longer validates: {problems:?}"
-    );
+    for (label, text) in [("x86", GENERATED_X86), ("x64", GENERATED_X64)] {
+        let generated = parse(label, text);
+        let problems = validate::structural_problems(&generated);
+        assert!(
+            problems.is_empty(),
+            "the golden {label} file no longer validates: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn the_player_struct_accounts_for_every_byte_the_client_reads() {
+    // The invariant that failed the first x64 run: the client copies
+    // bufferLength bytes and parses them with the struct, so a struct that
+    // describes fewer bytes is reading past its own buffer. x86 needs no
+    // trailing pad (a pointer is four bytes there), x64 needs four.
+    for (label, text, expected) in [("x86", GENERATED_X86, 92), ("x64", GENERATED_X64, 136)] {
+        let generated = parse(label, text);
+        let total: i64 = generated
+            .player
+            .struct_layout
+            .iter()
+            .map(|member| member.size())
+            .sum();
+        assert_eq!(generated.player.buffer_length, expected, "{label}");
+        assert_eq!(total, expected, "{label} struct does not fill bufferLength");
+    }
 }
 
 #[test]
@@ -113,4 +135,32 @@ fn the_known_defects_in_the_hand_written_x86_file_are_still_defects() {
     // MaxCount was inserted before it, between 17.4.0 and 2026.8.18.
     assert_eq!(reference.player.role_team, vec![76]);
     assert_eq!(generated.player.role_team, vec![80]);
+}
+
+#[test]
+fn the_known_defects_in_the_hand_written_x64_file_are_still_defects() {
+    let reference = parse("reference x64", REFERENCE_X64);
+    let generated = parse("generated x64", GENERATED_X64);
+
+    // A failed lookup written straight into a published file. The old
+    // generator searched for InnerNetClient.GameMode; the field is called
+    // NetworkMode, and -1 was the result nobody checked.
+    assert_eq!(reference.inner_net_client.game_mode, -1);
+    assert_eq!(generated.inner_net_client.game_mode, 68);
+
+    // 16 is HashSet<T>::_buckets at 8-byte pointers; the count is at 32.
+    assert_eq!(reference.hq_hud_completed_consoles, vec![24, 16]);
+    assert_eq!(generated.hq_hud_completed_consoles, vec![24, 32]);
+
+    // Il2CppArray::max_length is 12 on x86 and 24 on x64. Both of these
+    // carried the x86 number into the x64 file.
+    assert_eq!(reference.planet_surveillance_camaras_count, vec![216, 12]);
+    assert_eq!(generated.planet_surveillance_camaras_count, vec![216, 24]);
+    assert_eq!(reference.surveillance_filtered_rooms_count, vec![168, 12]);
+    assert_eq!(generated.surveillance_filtered_rooms_count, vec![168, 24]);
+
+    // Game change, as on x86: at 108 the client reads
+    // AffectedByLightAffectors, a bool, instead of the team type.
+    assert_eq!(reference.player.role_team, vec![108]);
+    assert_eq!(generated.player.role_team, vec![116]);
 }
