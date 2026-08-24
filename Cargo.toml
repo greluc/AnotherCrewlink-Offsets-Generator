@@ -1,0 +1,41 @@
+[package]
+name = "acl-offsetgen"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Generates AnotherCrewLink memory offsets and byte signatures from Among Us game files"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/greluc/AnotherCrewlink-Offsets-Generator"
+publish = false
+
+# Dependency policy (see README.md, "Supply chain"):
+#   * crates.io only, no git or path dependencies
+#   * no network, archive, or crypto crates -- HTTP and unzip live in a separate,
+#     auditable PowerShell script; SHA-256 is vendored in src/sha256.rs
+#   * every version pinned by Cargo.lock, which is committed; CI builds --locked
+[dependencies]
+clap = { version = "=4.6.6", default-features = false, features = [
+  "derive",
+  "std",
+  "help",
+  "usage",
+  "error-context",
+] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.151", features = ["preserve_order"] }
+iced-x86 = { version = "=1.21.0", features = [
+  "decoder",
+  "instr_info",
+  "std",
+], default-features = false }
+
+[profile.release]
+overflow-checks = true
+panic = "abort"
+codegen-units = 1
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

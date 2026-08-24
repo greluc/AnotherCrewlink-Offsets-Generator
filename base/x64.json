@@ -1,0 +1,39 @@
+{
+  "_comment": [
+    "Values for 64-bit Among Us builds (Epic Games, Microsoft Store) that cannot",
+    "be derived from a dump. See base/x86.json for the reasoning behind each",
+    "entry; only the numbers differ.",
+    "",
+    "These are carried from the hand-written V17.4.0 x64 offsets and have not",
+    "been re-verified against a 64-bit build, because the machine this was",
+    "written on only has the 32-bit Steam release installed. Run",
+    "`acl-offsetgen verify` against an Epic or Store install before trusting a",
+    "generated x64 file."
+  ],
+
+  "nativeRigidbodyPositionX": 176,
+
+  "serverManagerTail": [8, 16, 8],
+
+  "playerControlGameOptionsTail": [4],
+
+  "functionPlaceholders": {
+    "connectFunc": 4095,
+    "showModStampFunc": 4095,
+    "modLateUpdateFunc": 255,
+    "fixedUpdateFunc": 4095,
+    "pingMessageString": 4095
+  },
+
+  "_carriedSignatures": [
+    "Empty on 64-bit: GameReader only scans for the write-path signatures inside",
+    "an `if (!is_64bit)` branch, so they are never read here."
+  ],
+  "carriedSignatures": {},
+
+  "flags": {
+    "oldMeetingHud": false,
+    "disableWriting": false,
+    "newGameOptions": true
+  }
+}

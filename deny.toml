@@ -1,0 +1,73 @@
+# cargo-deny configuration. Run: cargo deny check
+#
+# The dependency set is deliberately tiny (clap, serde, serde_json, iced-x86 and
+# what they pull in). Every rule below is set to fail rather than warn, so a
+# dependency that drifts outside the policy breaks CI instead of sliding in.
+
+[graph]
+targets = ["x86_64-pc-windows-msvc"]
+all-features = false
+
+[advisories]
+version = 2
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+unmaintained = "all"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licences only. The generator itself is GPL-3.0-or-later; anything
+# copyleft arriving as a dependency would be a surprise worth reviewing.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "Unicode-3.0",
+  "Zlib",
+  "ISC",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+allow-wildcard-paths = false
+highlight = "all"
+
+# Nothing in this project should ever need to reach the network, spawn a shell,
+# open a socket or link native code. If one of these shows up as a transitive
+# dependency, that is a change in what the build can do, and it should be a
+# conscious decision rather than a silent upgrade.
+deny = [
+  { name = "reqwest" },
+  { name = "hyper" },
+  { name = "ureq" },
+  { name = "curl" },
+  { name = "curl-sys" },
+  { name = "openssl" },
+  { name = "openssl-sys" },
+  { name = "native-tls" },
+  { name = "rustls" },
+  { name = "tokio" },
+  { name = "async-std" },
+  { name = "zip" },
+  { name = "flate2" },
+  { name = "git2" },
+  { name = "libgit2-sys" },
+]
+
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# No git dependencies. A git dep is a moving target that Cargo.lock pins by
+# commit but that nobody re-reviews when it moves.
+allow-git = []

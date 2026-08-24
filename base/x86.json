@@ -1,0 +1,96 @@
+{
+  "_comment": [
+    "Values for 32-bit Among Us builds (Steam) that cannot be derived from a",
+    "dump. Everything else in offsets.json is read out of dump.cs, computed from",
+    "the pointer size, or generated as a signature -- see src/generate.rs.",
+    "",
+    "Keep this file small. Every entry here is a number that will eventually go",
+    "stale without anything noticing, which is exactly the failure mode the",
+    "rewrite exists to remove."
+  ],
+
+  "_nativeRigidbodyPositionX": [
+    "Offset of position.x inside Unity's native Rigidbody2D, reached via",
+    "PlayerControl.NetTransform -> CustomNetworkTransform.body -> m_CachedPtr.",
+    "Native engine layout, so no managed dump describes it; it changes only when",
+    "the Unity version changes. Verified against the hand-written V17.4.0 x86",
+    "offsets, which use 124 for x and 128 for y."
+  ],
+  "nativeRigidbodyPositionX": 124,
+
+  "_serverManagerTail": [
+    "Chain after static_fields: singleton slot, then ServerManager's current",
+    "region, then the field the client reads off it. Carried verbatim from the",
+    "working hand-written offsets -- it walks a generic singleton base whose",
+    "static layout a dump does not spell out."
+  ],
+  "serverManagerTail": [4, 20, 8],
+
+  "_playerControlGameOptionsTail": [
+    "Vestigial. The client stopped reading playerControl_GameOptions when",
+    "newGameOptions was introduced; the key stays so the file shape matches the",
+    "hand-written ones."
+  ],
+  "playerControlGameOptionsTail": [20],
+
+  "_functionPlaceholders": [
+    "Written straight through. The client overwrites all of these from the",
+    "write-path signatures below before using them."
+  ],
+  "functionPlaceholders": {
+    "connectFunc": 4095,
+    "showModStampFunc": 4095,
+    "modLateUpdateFunc": 255,
+    "fixedUpdateFunc": 4095,
+    "pingMessageString": 4095
+  },
+
+  "_carriedSignatures": [
+    "These point at function bodies rather than at a type-info slot, so the",
+    "generator cannot build them: there is no metadata anchor to start from.",
+    "They matter only when disableWriting is false, but GameReader scans for",
+    "them unconditionally on x86, so they have to be present and parseable.",
+    "",
+    "Two of them (connectFunc, fixedUpdateFunc) already fail to match Among Us",
+    "2026.8.18. That is harmless while disableWriting is true, and the run",
+    "report lists them as carried so it stays visible."
+  ],
+  "carriedSignatures": {
+    "showModStamp": {
+      "sig": "55 8B EC 8B 45 08 8B 40 10 85 C0 74 0F 6A 00 6A 01 50 E8 ? ? ? ? 83 C4 0C 5D C3 E9 ? ? ? ?",
+      "patternOffset": 0,
+      "addressOffset": -5
+    },
+    "connectFunc": {
+      "sig": "E8 ? ? ? ? A1 ? ? ? ? 83 C4 0C 8B 40 5C 8B 00 85 C0 0F 84 ? ? ? ? 6A 00 50 E8 ? ? ? ? 89",
+      "patternOffset": 1,
+      "addressOffset": 4
+    },
+    "fixedUpdateFunc": {
+      "sig": "75 ? 8B 46 ? 85 C0 74 0B 6A 00 50 E8 ? ? ? ? 83 C4 08 83 7E ? 00",
+      "patternOffset": 0,
+      "addressOffset": -5
+    },
+    "pingMessageString": {
+      "sig": "E8 ? ? ? ? 6A 00 50 FF 35 ? ? ? ? E8 ? ? ? ? 83 C4 1C 8B C8 85 F6 74 1A 8B 06 FF B0 ? ? ? ? 8B",
+      "patternOffset": 10,
+      "addressOffset": 0
+    },
+    "modLateUpdate": {
+      "sig": "53 8B DC 83 EC 08 83 E4 F0 83 C4 04 55 8B 6B 04 89 6C 24 04 8B EC 83 EC 28 80 3D",
+      "patternOffset": 0,
+      "addressOffset": 0
+    }
+  },
+
+  "_flags": [
+    "disableWriting has been true for 32-bit builds since the write path stopped",
+    "being maintained; leave it alone unless the mod-stamp signatures are",
+    "refreshed too."
+  ],
+  "flags": {
+    "oldMeetingHud": false,
+    "disableWriting": true,
+    "newGameOptions": true
+  }
+}

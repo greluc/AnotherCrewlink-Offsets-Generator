@@ -1,0 +1,7 @@
+# Everything here is source, and all of it is happy with LF on Windows. Pinning
+# the line ending keeps the checkout identical to the blob, so `cargo fmt
+# --check` in CI and a local build never disagree over a carriage return.
+* text=auto eol=lf
+
+# Fixtures are compared byte for byte by tests/schema_compatibility.rs.
+tests/fixtures/*.json text eol=lf

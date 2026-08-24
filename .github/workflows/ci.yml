@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege by default. No job here needs to write anything, and a
+# workflow that cannot push cannot be turned into one that does by a compromised
+# dependency.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail rather than reach for a network mirror mid-build.
+  CARGO_NET_RETRY: 2
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: build and test
+    runs-on: windows-latest
+    steps:
+      # Third-party actions are avoided entirely, and the one first-party action
+      # is pinned to a commit rather than a tag: a tag can be moved, a commit
+      # cannot. actions/checkout v7.0.1.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      # The runner ships rustup, which installs exactly what rust-toolchain.toml
+      # asks for. No toolchain action needed.
+      - name: Show toolchain
+        run: |
+          rustup show
+          cargo --version
+
+      # --locked everywhere: the build uses the committed Cargo.lock or fails.
+      # Without it, a yanked-and-republished version could slip in silently.
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --all-targets
+
+      - name: Build release
+        run: cargo build --locked --release
+
+      - name: Verify Cargo.lock is unchanged
+        shell: bash
+        run: |
+          if ! git diff --quiet -- Cargo.lock; then
+            echo "Cargo.lock changed during the build; commit the updated lock file." >&2
+            git diff -- Cargo.lock >&2
+            exit 1
+          fi
+
+  supply-chain:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      # cargo-deny is installed rather than run through its own action, so the
+      # workflow depends on one fewer third-party repository. --locked pins its
+      # dependency tree too.
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+
+      # advisories: known vulnerabilities and unmaintained crates
+      # bans:       the deny list in deny.toml, plus duplicate versions
+      # licenses:   permissive only
+      # sources:    crates.io only, no git dependencies
+      - name: cargo deny
+        run: cargo deny --all-features check advisories bans licenses sources
+
+      - name: No unexpected dependencies
+        shell: bash
+        run: |
+          # The dependency set is meant to stay small enough to read. If it
+          # grows, that should be a decision, not something noticed later.
+          count=$(cargo tree --locked --edges normal --prefix none \
+                  | grep -v '^$' | sort -u | wc -l)
+          echo "$count distinct crates in the normal dependency graph"
+          if [ "$count" -gt 40 ]; then
+            echo "Dependency graph grew past the agreed budget of 40 crates." >&2
+            cargo tree --locked --edges normal >&2
+            exit 1
+          fi
+
+  tool-pin:
+    name: pinned dumper still matches
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      # Downloads the pinned Il2CppDumper and verifies its digest. This is the
+      # canary for the archive being replaced upstream: GitHub release assets
+      # can be deleted and re-uploaded, and we would rather find out here than
+      # while trying to ship offsets after a game update.
+      - name: Fetch and verify Il2CppDumper
+        shell: pwsh
+        run: ./tools/fetch-il2cppdumper.ps1
+
+      - name: Doctor
+        run: cargo run --locked --release -- doctor

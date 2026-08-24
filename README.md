@@ -1,0 +1,214 @@
+# acl-offsetgen
+
+Generates the memory offsets and byte signatures [AnotherCrewLink](https://github.com/greluc/AnotherCrewLink)
+needs to read Among Us, straight from an installed copy of the game.
+
+Rust rewrite of the old `BCL-OffsetGenerator`. That tool had not produced
+anything since August 2024 — every offsets file published after it was written
+by hand — and it stopped for reasons the rewrite is built around.
+
+```
+acl-offsetgen generate --game "D:\SteamLibrary\steamapps\common\Among Us" --out ..\AnotherCrewlink-Offsets
+```
+
+```
+Il2CppDumper v6.7.46 verified at .\tools\il2cppdumper\Il2CppDumper.exe
+Among Us 2026.8.18 (x86, Unity 2022.3.44f1)
+  18030 classes, 13642 type-info slots, Il2CppClass::static_fields at 92
+
+provenance
+  55 values read from the dump, 9 derived from the pointer size, 9 signatures generated
+  4 value(s) carried from the base file, because no dump describes them:
+    ...
+  note: innerNetClient.gameMode: InnerNetClient.GameMode is gone in this build; used InnerNetClient.NetworkMode instead
+
+validation
+  198 checks passed
+
+broadcast version 50663350
+lookup: 50663350 -> V2026.8.18/offsets.json (offsetsVersion 1, new file)
+```
+
+## What was wrong, and what changed
+
+**Signatures were never generated.** The client locates every static class
+(`PlayerControl`, `GameData`, `ShipStatus`, …) with a byte pattern, and
+`GameReader.initializeoffsets` overwrites slot 0 of each chain with the result.
+The old generator kept those patterns as literals in its base files and copied
+them through, so a game rebuild meant a session in a disassembler. That is why
+the pipeline quietly became a manual process.
+
+They are generated now. `script.json` gives the RVA of the global holding each
+type's `Il2CppClass*`; any instruction that loads it is a usable anchor, so the
+generator finds one, wildcards everything the loader may rewrite, and grows the
+pattern instruction by instruction until it matches exactly once. Then it
+resolves the finished pattern with the client's own arithmetic and checks it
+lands back on the slot it started from. Nine signatures for Among Us 2026.8.18
+come out between 14 and 24 bytes and take about a second.
+
+Which bytes get wildcarded is not guesswork: the PE's own `.reloc` table says
+which ones the loader rewrites, and every one of them becomes a `?`. That is
+what makes the pattern survive ASLR, and it also masks unrelated globals that
+happen to sit inside the pattern.
+
+**The base files had drifted three years out of date.** Chains had grown hops
+the old code could not fill — it only ever wrote indices `[0]` and `[1]`, while
+`player.localX` needs four. Field offsets are now read from the dump by class
+and field name and assembled per architecture, and the handful of numbers no
+dump can describe live in `base/x86.json` and `base/x64.json`, each with a note
+saying why it is there. The run report lists them every time so they cannot rot
+unnoticed.
+
+**Nothing checked the output.** A failed lookup wrote `-1` into the published
+file and printed a line nobody read. Now a failed lookup fails the run, and
+before anything is written the result goes through 198 checks: no unresolved
+values, chain shapes consistent, the player struct's size matching
+`bufferLength`, and every signature scanned for and resolved against the binary.
+If a check fails, nothing is written.
+
+Some smaller things that were also wrong: the version search read a fixed byte
+window that Unity 2022.3 moved out from under it (the string sits at 0x7A8 now,
+the window looked at 0xFF0–0x14A0); the field search only looked 200 lines past
+a class declaration, and `PlayerControl` alone spans 597; `default` in
+`lookup.json` was picked by dictionary position rather than by version; and
+`offsetsVersion` was one global constant, although the client compares it per
+file, so republishing a corrected file left every client on its cached copy.
+
+## Running it
+
+Install the pinned dumper once:
+
+```bash
+pwsh tools/fetch-il2cppdumper.ps1
+```
+
+```bash
+cargo run --release -- doctor
+```
+
+```bash
+cargo run --release -- generate --game "<Among Us folder>" --out "<offsets repo>" --dry-run
+```
+
+`--dry-run` prints everything, including the diff against the file already in
+the repository, and writes nothing. Drop it to publish.
+
+`verify` checks an existing offsets file against a game build without writing —
+it works on hand-written files too, so it can gate the offsets repository:
+
+```bash
+cargo run --release -- verify --game "<Among Us folder>" --offsets ../AnotherCrewlink-Offsets/offsets/x86/V17.4.0/offsets.json
+```
+
+The dump is cached under `work/dumps/<version>-<arch>`; `--force-dump` redoes it.
+
+## Supply chain
+
+The generator is a build tool for files that end up on every user's machine, so
+the things it trusts are kept few and pinned.
+
+**Il2CppDumper stays external and pinned.** `tools.lock.json` records the
+release tag, the archive's SHA-256 and size, and the digest of each extracted
+binary. `tools/fetch-il2cppdumper.ps1` verifies the archive before extracting
+and each binary afterwards; `acl-offsetgen` re-verifies the executable's digest
+before every run and refuses to start it otherwise. Upgrading is a reviewed diff
+to `tools.lock.json`, never something a script does on its own.
+
+GitHub does not publish a digest for this asset, so the pin is trust-on-first-use:
+downloaded once on 2026-08-24, digest recorded, verified ever since. CI re-fetches
+and re-verifies on every run, which is the canary for the asset being replaced
+upstream.
+
+**The network lives in one script.** HTTP and unzip are in
+`tools/fetch-il2cppdumper.ps1`, roughly a hundred readable lines, and not in the
+Rust build at all. That keeps `reqwest`, a TLS stack, `zip` and `flate2` out of
+the dependency graph — `deny.toml` bans them by name so they cannot come back as
+a transitive dependency without someone noticing.
+
+**Dependencies:** four direct (`clap`, `serde`, `serde_json`, `iced-x86`), 22
+crates in the whole graph, every version pinned with `=`, `Cargo.lock` committed,
+every CI command `--locked`. SHA-256 is vendored in `src/sha256.rs` rather than
+pulled from a crate family, because it is the code that decides whether we are
+willing to execute an external binary and it should be readable in one sitting.
+`cargo deny` enforces crates.io as the only source, no git dependencies,
+permissive licences only, no duplicate versions, and no known advisories. CI
+fails if the graph grows past 40 crates.
+
+**CI** uses exactly one action, `actions/checkout`, pinned to a commit rather
+than a tag, with `persist-credentials: false` and `permissions: contents: read`.
+The toolchain comes from `rust-toolchain.toml` via the runner's own rustup.
+
+## Regression testing
+
+Eighty tests, none of which need Among Us installed.
+
+The signature generator is tested end to end against a synthetic PE built in the
+test: several instructions reference the same slot, one is followed by identical
+code so the shortest pattern is ambiguous and has to grow, and every absolute
+address is relocated so a correct signature has to wildcard all of them. The
+tests assert the result is unique, resolves back to the slot, and does not spell
+out a single relocated address.
+
+`tests/fixtures/` holds the hand-written V17.4.0 offsets for both architectures
+and the first file this generator produced. They pin the contract with the
+client: if a key is renamed or changes shape on either side, parsing fails; key
+order is checked too, so a regenerated version shows up as a small diff rather
+than a rewrite of the whole file.
+
+Three differences between the generated file and the hand-written x86 reference
+are pinned as tests, because two of them are defects in the shipping file:
+
+| field | shipping x86 | generated | why |
+|---|---|---|---|
+| `gameoptionsData` | `[-1, 92, 24]` | `[-1, 92, 0, 20]` | the `Instance` dereference is missing; the x64 file has it |
+| `hqHudSystemType_CompletedConsoles` | `[12, 8]` | `[12, 16]` | 8 is `HashSet<T>::_buckets`, the count is at 16; x64 uses 32, the same field |
+| `player.roleTeam` | `[76]` | `[80]` | a real game change — `MaxCount` was inserted before `RoleBehaviour.TeamType` after 17.4.0 |
+
+Everything else — 64 of 68 fields, including the entire player struct layout —
+matches the hand-written reference exactly.
+
+## Known limits
+
+**x64 is not verified.** Only the 32-bit Steam build was available while this
+was written. The code is architecture-generic and the x64 constants are carried
+from the working hand-written file, but nothing has been generated against an
+Epic or Microsoft Store install. Run `verify` against one before trusting a
+generated x64 file.
+
+**The broadcast-version pattern is not generated.** It points at an immediate
+rather than a type-info slot, so there is no metadata anchor to build from. It
+lives in `lookup.json` and still matches 2026.8.18; if a future build recompiles
+the version check it has to be refreshed by hand.
+
+**The write-path signatures are not generated either.** `showModStamp`,
+`connectFunc`, `fixedUpdateFunc`, `modLateUpdate` and `pingMessageString` point
+at function bodies. They are carried from `base/x86.json`, listed as carried in
+every run report, and only used when `disableWriting` is false — which it is not
+on x86. Two of them no longer match 2026.8.18.
+
+**Steam downloading is gone.** The old tool drove a 2022 fork of DepotDownloader
+whose Steam login flow Valve has retired, and scraped a SteamDB page that had to
+be saved by hand and served from localhost. Generating from a local installation
+covers the case that matters; building offsets for historical versions would need
+a current DepotDownloader invoked as a separate tool.
+
+## Layout
+
+```
+base/                     per-architecture constants no dump can provide
+src/
+  dumpcs.rs               dump.cs -> class and field index
+  scriptjson.rs           script.json -> type-info slot RVAs
+  il2cpph.rs              il2cpp.h -> Il2CppClass::static_fields offset
+  pe.rs                   PE parsing, section mapping, relocation bitmap
+  pattern.rs              byte signatures: parse, format, scan
+  siggen.rs               signature generation
+  gameinfo.rs             game version, broadcast version
+  generate.rs             assembles offsets.json, records provenance
+  validate.rs             the gate between generated and published
+  lookup.rs               lookup.json, per-file offsetsVersion
+  report.rs               diff against the previous version
+  tools.rs                runs Il2CppDumper, enforces the digest pin
+  sha256.rs               vendored, so the digest check has no dependencies
+tools/                    fetch script and the installed dumper (gitignored)
+```

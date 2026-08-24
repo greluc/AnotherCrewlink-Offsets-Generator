@@ -1,0 +1,46 @@
+{
+  "_comment": [
+    "Pinned external tooling. acl-offsetgen refuses to execute a binary whose",
+    "SHA-256 is not listed here, so swapping the dumper on disk fails closed",
+    "instead of silently producing offsets from an unknown build.",
+    "",
+    "To move to a newer Il2CppDumper: bump tag/asset/size, run",
+    "tools/fetch-il2cppdumper.ps1 -Update to print the observed digests, review",
+    "them against the upstream release page, then paste them in and commit.",
+    "Never let a script rewrite this file unattended -- the whole point is that a",
+    "human signs off on the change in a reviewable diff."
+  ],
+  "il2cppdumper": {
+    "upstream": "https://github.com/Perfare/Il2CppDumper",
+    "tag": "v6.7.46",
+    "released": "2024-07-06",
+    "supported_metadata_versions": "16-31",
+    "why_this_asset": [
+      "Il2CppDumper-win-*.zip is the self-contained win-x64 build. The framework",
+      "dependent net6/net7 assets need a .NET 6 runtime, which is end of life and",
+      "no longer installed on current machines -- that was bug F11 in the audit."
+    ],
+    "archive": {
+      "asset": "Il2CppDumper-win-v6.7.46.zip",
+      "url": "https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-win-v6.7.46.zip",
+      "size": 11215992,
+      "sha256": "f5fc60dfc5c034c1ff3fc651514416ebd47658a63493207734537fd25fa2dea2",
+      "pinned_on": "2026-08-24",
+      "pinned_note": "GitHub does not publish a digest for this asset (it predates the release-asset digest feature), so this is trust-on-first-use: downloaded once, digest recorded, verified on every fetch and every run afterwards."
+    },
+    "binaries": [
+      {
+        "path": "Il2CppDumper.exe",
+        "size": 13374349,
+        "sha256": "071e36d396ae93cb2cfec032513b46a6bfd67e9b93157830711ab6d79db55045",
+        "note": "used for both x86 and x64 game files; the -x86 suffix on the other binary refers to the dumper's own architecture, not the target"
+      },
+      {
+        "path": "Il2CppDumper-x86.exe",
+        "size": 12370829,
+        "sha256": "6ff7be0e2a8bd61b641a1677a21ab8e31c8f45e79a7fcf67387c12fb7ae86640",
+        "note": "32-bit build of the dumper, kept for hosts without x64"
+      }
+    ]
+  }
+}
