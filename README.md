@@ -156,7 +156,7 @@ The toolchain comes from `rust-toolchain.toml` via the runner's own rustup.
 
 ## Regression testing
 
-Ninety-five tests, none of which need Among Us installed.
+Ninety-six tests, none of which need Among Us installed.
 
 The signature generator is tested end to end against a synthetic PE built in the
 test: several instructions reference the same slot, one is followed by identical
@@ -186,6 +186,13 @@ tests, because most of it is defects in the shipping files:
 Everything else matches: 64 of 68 fields on x86 and 53 of 68 on x64, where the
 remaining x64 differences are the slot-0 placeholders the client overwrites
 anyway.
+
+One key is deliberately no longer emitted. `mushroomDoor_isOpen` has no
+references anywhere in AnotherCrewLink and is absent from its `IOffsets`
+interface, but it failed to resolve on every build older than the Fungle and
+was published as `-1` in 28 of the 44 offsets files -- the single largest source
+of unresolved values in the repository, for a field with no consumer. Dropping
+it needs no client change, since nothing was reading it.
 
 ## Known limits
 

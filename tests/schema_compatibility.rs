@@ -53,6 +53,37 @@ fn round_tripping_a_reference_file_preserves_every_field() {
     }
 }
 
+/// Keys the generator deliberately stopped emitting.
+///
+/// `mushroomDoor_isOpen` was dropped because nothing reads it: it is absent
+/// from the client's `IOffsets` and has no references anywhere in
+/// AnotherCrewLink, while failing to resolve on every build older than the
+/// Fungle. It accounted for 28 of the unresolved values across the published
+/// offsets, for a field with no consumer.
+const DELIBERATELY_DROPPED: [&str; 1] = ["mushroomDoor_isOpen"];
+
+#[test]
+fn a_dropped_key_is_gone_from_the_generated_files_and_still_present_in_the_references() {
+    // Guards the intent from both sides: if the field ever comes back into the
+    // schema this fails, and if someone "cleans up" the reference fixtures the
+    // comparison above would silently start passing for the wrong reason.
+    for (label, text) in [("x86", GENERATED_X86), ("x64", GENERATED_X64)] {
+        let value: serde_json::Value = serde_json::from_str(text).expect("parses");
+        for key in DELIBERATELY_DROPPED {
+            assert!(
+                value.get(key).is_none(),
+                "{label} still emits the dropped key {key}"
+            );
+        }
+    }
+    let reference: serde_json::Value =
+        serde_json::from_str(REFERENCE_X86).expect("reference parses");
+    assert!(
+        reference.get("mushroomDoor_isOpen").is_some(),
+        "the reference fixture should still show what was dropped"
+    );
+}
+
 #[test]
 fn generated_output_keeps_the_key_order_of_the_hand_written_files() {
     // The offsets repository is reviewed as a git diff. If our key order drifts
@@ -66,7 +97,16 @@ fn generated_output_keeps_the_key_order_of_the_hand_written_files() {
     let keys = |value: &serde_json::Value| -> Vec<String> {
         value.as_object().expect("object").keys().cloned().collect()
     };
-    assert_eq!(keys(&reference), keys(&generated));
+    let expected: Vec<String> = keys(&reference)
+        .into_iter()
+        .filter(|key| !DELIBERATELY_DROPPED.contains(&key.as_str()))
+        .collect();
+    assert_eq!(
+        expected,
+        keys(&generated),
+        "generated key order should match the hand-written files apart from the \
+         keys we chose to drop"
+    );
     assert_eq!(
         keys(&reference["player"]),
         keys(&generated["player"]),

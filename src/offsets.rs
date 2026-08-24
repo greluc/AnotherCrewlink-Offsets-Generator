@@ -46,8 +46,12 @@ pub struct Offsets {
     pub door_door_id: i64,
     #[serde(rename = "door_isOpen")]
     pub door_is_open: i64,
-    #[serde(rename = "mushroomDoor_isOpen")]
-    pub mushroom_door_is_open: i64,
+    // `mushroomDoor_isOpen` used to sit here. The client never read it: it is
+    // absent from `IOffsets` and has no references anywhere in AnotherCrewLink.
+    // What it did do was fail to resolve on every build made before the Fungle
+    // added `MushroomWallDoor`, and get published as -1 in 28 of the 44 offsets
+    // files -- the single largest source of unresolved values in the repository,
+    // for a field nothing consumes.
     #[serde(rename = "deconDoorUpperOpen")]
     pub decon_door_upper_open: Vec<i64>,
     #[serde(rename = "deconDoorLowerOpen")]

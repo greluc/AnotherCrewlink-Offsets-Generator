@@ -423,7 +423,6 @@ mod tests {
             shipstatus_all_doors: vec![148],
             door_door_id: 16,
             door_is_open: 24,
-            mushroom_door_is_open: 48,
             decon_door_upper_open: vec![16, 24],
             decon_door_lower_open: vec![20, 24],
             hq_hud_completed_consoles: vec![12, 16],

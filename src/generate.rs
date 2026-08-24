@@ -532,7 +532,6 @@ impl<'a> Generator<'a> {
             )],
             door_door_id: self.field("door_doorId", "OpenableDoor", &["Id"]),
             door_is_open,
-            mushroom_door_is_open: self.field("mushroomDoor_isOpen", "MushroomWallDoor", &["open"]),
             decon_door_upper_open: vec![decon_upper, door_is_open],
             decon_door_lower_open: vec![decon_lower, door_is_open],
             hq_hud_completed_consoles: vec![
