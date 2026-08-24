@@ -283,19 +283,32 @@ fn check_write_path(
 
     for (name, signature) in entries {
         checks += 1;
+        // Counted up to a cap rather than stopping at two. "Matches 2 times"
+        // for a pattern that matches 162 understates the problem, and the
+        // number is the whole point of the message.
+        const COUNT_CAP: usize = 200;
         let matches = signature
             .sig
             .as_deref()
             .and_then(|text| Pattern::parse(text).ok())
-            .map(|pattern| pattern.find_all(image.mapped(), 2).len());
+            .map(|pattern| pattern.find_all(image.mapped(), COUNT_CAP).len());
 
+        // Exactly one match, or it is not usable. Elsewhere an ambiguous
+        // signature only means the client reads from the wrong place; here it
+        // means the client *writes* a five-byte jump over whatever the first
+        // match happened to be. `modLateUpdate` matches 162 times against Among
+        // Us 2026.8.18 -- it is a bare function prologue -- so "the client takes
+        // the first one" would be a jump patched into an arbitrary function.
         let usable = match matches {
             Some(1) => true,
-            // The client takes the first match, so several is not fatal on its
-            // own -- but it is a coin flip, and worth naming.
             Some(count) if count > 1 => {
-                stale.push(format!("{name} matches more than once"));
-                true
+                let count = if count >= COUNT_CAP {
+                    format!("{COUNT_CAP}+")
+                } else {
+                    count.to_string()
+                };
+                stale.push(format!("{name} matches {count} times, so it names no site"));
+                false
             }
             Some(_) => {
                 stale.push(format!("{name} does not match this build"));
@@ -309,9 +322,10 @@ fn check_write_path(
 
         if !usable && !offsets.disable_writing {
             problems.push(format!(
-                "signatures.{name} does not resolve on this build, and disableWriting is \
-                 false. The client patches the running game with this address -- writing \
-                 shellcode to whatever it resolves to instead is not something to ship."
+                "signatures.{name} does not name exactly one site on this build, and \
+                 disableWriting is false. The client writes a jump instruction at that \
+                 address -- patching whatever it happens to resolve to is not something \
+                 to ship."
             ));
         }
     }
@@ -319,8 +333,10 @@ fn check_write_path(
     if !stale.is_empty() && offsets.disable_writing {
         warnings.push(format!(
             "write-path signatures are stale ({}). Harmless while disableWriting is true, \
-             since nothing reads them -- but they have to be refreshed by hand before it is \
-             turned off. They are hook points for injected shellcode and cannot be generated.",
+             since nothing reads them. Refreshing them is a change to AnotherCrewLink, not \
+             to this generator: the client relocates the hook site's original instructions \
+             into its shellcode as hardcoded bytes, so a new signature alone would still \
+             patch the wrong thing. Matching signatures are necessary, not sufficient.",
             stale.join(", ")
         ));
     }

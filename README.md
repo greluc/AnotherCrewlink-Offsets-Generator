@@ -208,19 +208,24 @@ it needs no client change, since nothing was reading it.
 
 ## Known limits
 
-**The write-path signatures are not generated.** `showModStamp`, `connectFunc`,
-`fixedUpdateFunc`, `modLateUpdate` and `pingMessageString` are hook points for
-shellcode the client writes into the running game, not addresses of anything
-metadata describes — which function to detour, and where inside it, is a
-decision encoded in the pattern itself. They stay in `base/x86.json`.
+**The write path cannot be refreshed from here, and that is not a gap waiting
+to be filled.** `showModStamp`, `connectFunc`, `fixedUpdateFunc`,
+`modLateUpdate` and `pingMessageString` are hook sites for shellcode the client
+injects into the running game. The client writes a five-byte jump over the site
+and carries the instructions it displaced in its shellcode as literal bytes
+(`0x55, 0x8b, 0xec, 0x56, 0x8b, 0x75, 0x08` for the fixedUpdate detour), so a
+regenerated signature would point somewhere new while the shellcode kept
+relocating the old build's instructions. Refreshing it is a change to
+AnotherCrewLink, verified by injecting code into a live game. A matching
+signature is necessary and nowhere near sufficient.
 
-They are checked, though, and the failure mode is now safe rather than silent:
-with `disableWriting` off, a write-path signature that no longer resolves fails
-the run, because the client would otherwise write shellcode to whatever address
-it produced. With `disableWriting` on — which is the case on x86 — nothing reads
-them, so a stale one is reported as a warning on every run instead of being
-discovered by whoever turns writing back on. Three of the five are stale against
-2026.8.18 today.
+What is here is the safety property. Against 2026.8.18 two of the five no longer
+match at all and `modLateUpdate` matches 162 times — it is a bare function
+prologue, so "the client takes the first match" would patch a jump into an
+arbitrary function. Anything other than exactly one match counts as unusable,
+which fails the run outright if `disableWriting` is false and is reported as a
+warning on every run while it is true. The numbers live in `base/x86.json` next
+to the signatures.
 
 **Steam downloading is gone.** The old tool drove a 2022 fork of DepotDownloader
 whose Steam login flow Valve has retired, and scraped a SteamDB page that had to
