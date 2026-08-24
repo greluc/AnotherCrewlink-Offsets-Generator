@@ -2,7 +2,11 @@
 name = "acl-offsetgen"
 version = "1.0.0"
 edition = "2021"
-rust-version = "1.82"
+# Verified by CI rather than asserted. 1.85 is where edition 2024 landed, which
+# clap, hashbrown and indexmap now require -- an older toolchain cannot even
+# parse their manifests. The toolchain the project is *built* with is a separate
+# question, pinned in rust-toolchain.toml.
+rust-version = "1.85"
 description = "Generates AnotherCrewLink memory offsets and byte signatures from Among Us game files"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/greluc/AnotherCrewlink-Offsets-Generator"

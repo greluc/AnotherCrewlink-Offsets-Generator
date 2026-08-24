@@ -1,0 +1,34 @@
+version: 2
+
+# Everything in this repository is pinned on purpose: crate versions with `=`,
+# the toolchain in rust-toolchain.toml, actions by commit SHA, and Il2CppDumper
+# by digest. That is good for reproducibility and bad for staying current --
+# nothing moves unless somebody goes looking, and nobody goes looking between
+# game updates.
+#
+# Dependabot is the other half of that trade. It turns "a new version exists"
+# into a pull request that runs the full CI, so an update is reviewed rather
+# than either applied blindly or missed entirely.
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    groups:
+      # One PR for the routine patch traffic; anything that changes a major or
+      # minor version arrives separately and gets read properly.
+      patch-updates:
+        update-types:
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "ci"

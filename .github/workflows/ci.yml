@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Advisories are the one check whose result changes without anyone touching
+  # the code: a graph that is clean today can be vulnerable tomorrow. This
+  # repository sees a burst of commits around a game update and then nothing for
+  # months, so without a schedule the first notice would arrive far too late.
+  schedule:
+    - cron: "17 6 * * 1"
 
 # Least privilege by default. No job here needs to write anything, and a
 # workflow that cannot push cannot be turned into one that does by a compromised
@@ -20,12 +26,16 @@ env:
   CARGO_TERM_COLOR: always
   # Fail rather than reach for a network mirror mid-build.
   CARGO_NET_RETRY: 2
-  RUSTFLAGS: -D warnings
+  # RUSTFLAGS is deliberately not set here. `-D warnings` in the environment
+  # applies to dependencies as well, so a warning in someone else's crate would
+  # fail our build. `cargo clippy -- -D warnings` below denies rustc warnings
+  # too, and only for the code we actually own.
 
 jobs:
   test:
     name: build and test
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       # Third-party actions are avoided entirely, and the one first-party action
       # is pinned to a commit rather than a tag: a tag can be moved, a commit
@@ -64,9 +74,31 @@ jobs:
             exit 1
           fi
 
+  msrv:
+    name: minimum supported Rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      # Cargo.toml declares a rust-version. Nothing used to check it, and it was
+      # wrong: it claimed 1.82 while clap and indexmap had moved to edition
+      # 2024, which needs 1.85. An untested MSRV is a claim with no consumer, so
+      # either it gets verified or it should not be there.
+      - name: Check against the declared rust-version
+        run: |
+          msrv=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)
+          echo "declared MSRV: $msrv"
+          rustup toolchain install "$msrv" --profile minimal --no-self-update
+          # rust-toolchain.toml would otherwise override the choice.
+          cargo "+$msrv" check --locked --all-targets
+
   supply-chain:
     name: dependency audit
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -80,7 +112,7 @@ jobs:
 
       # advisories: known vulnerabilities and unmaintained crates
       # bans:       the deny list in deny.toml, plus duplicate versions
-      # licenses:   permissive only
+      # licenses:   permissive only, and exactly the set in use
       # sources:    crates.io only, no git dependencies
       - name: cargo deny
         run: cargo deny --all-features check advisories bans licenses sources
@@ -90,18 +122,23 @@ jobs:
         run: |
           # The dependency set is meant to stay small enough to read. If it
           # grows, that should be a decision, not something noticed later.
+          #
+          # --target matters: this job runs on Linux but the tool only ever ships
+          # for Windows, so without it the count describes a graph nobody builds.
           count=$(cargo tree --locked --edges normal --prefix none \
-                  | grep -v '^$' | sort -u | wc -l)
-          echo "$count distinct crates in the normal dependency graph"
+                    --target x86_64-pc-windows-msvc \
+                  | sed 's/ (\*)$//' | grep -v '^$' | sort -u | wc -l)
+          echo "$count distinct crates in the Windows dependency graph"
           if [ "$count" -gt 40 ]; then
             echo "Dependency graph grew past the agreed budget of 40 crates." >&2
-            cargo tree --locked --edges normal >&2
+            cargo tree --locked --edges normal --target x86_64-pc-windows-msvc >&2
             exit 1
           fi
 
   tool-pin:
     name: pinned dumper still matches
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -110,7 +147,8 @@ jobs:
       # Downloads the pinned Il2CppDumper and verifies its digest. This is the
       # canary for the archive being replaced upstream: GitHub release assets
       # can be deleted and re-uploaded, and we would rather find out here than
-      # while trying to ship offsets after a game update.
+      # while trying to ship offsets after a game update. The weekly schedule
+      # above is what makes it a canary rather than a coincidence.
       - name: Fetch and verify Il2CppDumper
         shell: pwsh
         run: ./tools/fetch-il2cppdumper.ps1

@@ -154,6 +154,18 @@ fails if the graph grows past 40 crates.
 than a tag, with `persist-credentials: false` and `permissions: contents: read`.
 The toolchain comes from `rust-toolchain.toml` via the runner's own rustup.
 
+It also runs weekly, not only on push. Advisories are the one check whose result
+changes without anyone touching the code, and this repository goes quiet between
+game updates -- on push alone the first notice of a new advisory, or of the
+pinned Il2CppDumper archive being replaced upstream, would arrive months late.
+
+Everything being pinned is good for reproducibility and bad for staying current,
+so Dependabot covers the other half: it turns "a newer version exists" into a
+pull request that runs the full CI, rather than an update that is either applied
+blindly or missed. A separate job builds against the `rust-version` in
+`Cargo.toml`, because an MSRV nothing verifies is a claim with no consumer --
+the declared one was wrong until that job existed.
+
 ## Regression testing
 
 Ninety-six tests, none of which need Among Us installed.

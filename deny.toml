@@ -18,20 +18,30 @@ ignore = []
 
 [licenses]
 version = 2
+
 # Permissive licences only. The generator itself is GPL-3.0-or-later; anything
-# copyleft arriving as a dependency would be a surprise worth reviewing.
-allow = [
-  "MIT",
-  "Apache-2.0",
-  "Apache-2.0 WITH LLVM-exception",
-  "BSD-2-Clause",
-  "BSD-3-Clause",
-  "Unicode-3.0",
-  "Zlib",
-  "ISC",
-]
+# copyleft arriving as a *dependency* would be a surprise worth reviewing, and
+# that is what this list is for.
+#
+# The list is exactly what the current graph uses, not a comfortable margin. A
+# new dependency under some other permissive licence will fail this check, which
+# is the intent: adding one should be a decision someone makes, not something
+# that slides in because BSD-3-Clause happened to be pre-approved years ago.
+#
+#   MIT           most of the graph
+#   Apache-2.0    the other half of the usual "MIT OR Apache-2.0" dual licence
+#   Unicode-3.0   unicode-ident, which is "(MIT OR Apache-2.0) AND Unicode-3.0"
+allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
 confidence-threshold = 0.93
 exceptions = []
+
+# Skip the licence check for our own crate. cargo-deny applies `allow` to every
+# package in the graph including workspace members, so the permissive-only list
+# above rejected acl-offsetgen itself for being GPL-3.0-or-later. Adding GPL to
+# the allow list would have "fixed" it by also letting a copyleft dependency
+# through unnoticed, which is the one thing the list exists to prevent. This
+# only covers members marked `publish = false`, which acl-offsetgen is.
+private = { ignore = true }
 
 [bans]
 multiple-versions = "deny"
