@@ -13,7 +13,20 @@
 
   "nativeRigidbodyPositionX": 176,
 
-  "serverManagerTail": [8, 16, 8],
+  "_serverManagerTail": [
+    "static_fields -> singleton -> ServerManager.<CurrentRegion> -> its <Name>.",
+    "",
+    "Read out of the running game on 2026-08-24, because the carried value was",
+    "wrong and so was upstream's. Both started at static_fields + 8, which is",
+    "null in this build: the ServerManager instance sits at + 16. Walked live,",
+    "[16, 40, 16] yields \"Europe\" while [8, 16, 8] and upstream's [8, 40, 16]",
+    "both yield an empty string. The instance at + 16 is the coherent one --",
+    "its CurrentUdpServer is matchmaker-eu.among.us, matching that region.",
+    "",
+    "40 is ServerManager.<CurrentRegion> and 16 is StaticRegionInfo.<Name>,",
+    "both straight from the x64 dump. Only the first hop needed the game."
+  ],
+  "serverManagerTail": [16, 40, 16],
 
   "playerControlGameOptionsTail": [4],
 

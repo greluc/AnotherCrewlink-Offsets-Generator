@@ -42,8 +42,10 @@ pub struct BaseConstants {
     pub native_rigidbody_position_x: i64,
 
     /// Tail of the `serverManager_currentServer` chain after `static_fields`.
-    /// Walks the singleton to the current region and its name; the shape has
-    /// never been re-derived from a dump, so it is carried verbatim.
+    /// Walks the singleton to the current region and its name. The two field
+    /// offsets come from the dump; the first hop -- which static slot holds the
+    /// singleton -- had to be read out of the running game, because no dump
+    /// says where a generic base class keeps its instance.
     #[serde(rename = "serverManagerTail")]
     pub server_manager_tail: Vec<i64>,
 
@@ -379,7 +381,7 @@ impl<'a> Generator<'a> {
         );
         self.carried(
             "serverManager_currentServer tail",
-            "singleton walk to the current region name; never re-derived from a dump",
+            "singleton walk to the current region name; the first hop was read out of \n             the running game, the rest comes from the dump",
         );
         server_manager.extend(self.base.server_manager_tail.iter().copied());
 
