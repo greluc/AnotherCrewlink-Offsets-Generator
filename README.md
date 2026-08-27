@@ -90,6 +90,13 @@ to a cached or embedded one. Those bounds are duplicated in `validate.rs` under
 would refuse fails here instead of at the far end of a fetch on someone else's
 machine. If the client moves a bound, that module is what has to follow.
 
+`lookup.json` goes through the same gate before it is written, which matters
+more than the offsets files do: a refused offsets file costs one game build, a
+refused lookup costs the bundle, because the client falls back to its cached
+copy and every version stops updating at once. Entries the generator owns it
+repairs; an entry it does not touch — a hand-edited `file` that would redirect
+the fetch, say — stops the run.
+
 Some smaller things that were also wrong: the version search read a fixed byte
 window that Unity 2022.3 moved out from under it (the string sits at 0x7A8 now,
 the window looked at 0xFF0–0x14A0); the field search only looked 200 lines past
@@ -183,7 +190,7 @@ the declared one was wrong until that job existed.
 
 ## Regression testing
 
-One hundred and five tests, none of which need Among Us installed.
+One hundred and ten tests, none of which need Among Us installed.
 
 The signature generator is tested end to end against a synthetic PE built in the
 test: several instructions reference the same slot, one is followed by identical

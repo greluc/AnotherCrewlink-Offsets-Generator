@@ -467,6 +467,70 @@ mod tests {
     }
 
     #[test]
+    fn a_healthy_lookup_has_no_client_contract_problems() {
+        let mut lookup = lookup_with(&[("100", "V1", "V1/offsets.json", 1)]);
+        lookup.refresh_default().expect("default");
+        assert!(
+            crate::validate::lookup_problems(&lookup).is_empty(),
+            "{:?}",
+            crate::validate::lookup_problems(&lookup)
+        );
+    }
+
+    #[test]
+    fn a_lookup_without_default_is_caught() {
+        // Every unrecognised build falls through to `default`. Without it the
+        // client rejects the whole bundle, not just one version.
+        let lookup = lookup_with(&[("100", "V1", "V1/offsets.json", 1)]);
+        let problems = crate::validate::lookup_problems(&lookup);
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].contains("versions.default"));
+    }
+
+    #[test]
+    fn a_file_path_that_could_redirect_the_fetch_is_caught() {
+        // `file` is interpolated into a URL by the client, so a traversal or an
+        // absolute URL would point the offsets fetch somewhere else entirely.
+        for bad in [
+            "../../etc/passwd.json",
+            "https://example.com/offsets.json",
+            "/absolute/offsets.json",
+            "V1/offsets.txt",
+        ] {
+            let mut lookup = lookup_with(&[("100", "V1", bad, 1)]);
+            lookup.refresh_default().expect("default");
+            let problems = crate::validate::lookup_problems(&lookup);
+            assert!(
+                problems.iter().any(|p| p.contains("relative .json path")),
+                "{bad} should have been rejected, got {problems:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_negative_bundle_version_is_caught() {
+        let mut lookup = lookup_with(&[("100", "V1", "V1/offsets.json", 1)]);
+        lookup.refresh_default().expect("default");
+        lookup
+            .extra
+            .insert("bundle_version".to_string(), serde_json::json!(-1));
+        let problems = crate::validate::lookup_problems(&lookup);
+        assert!(problems.iter().any(|p| p.contains("negative")));
+    }
+
+    #[test]
+    fn a_malformed_min_client_version_is_caught() {
+        let mut lookup = lookup_with(&[("100", "V1", "V1/offsets.json", 1)]);
+        lookup.refresh_default().expect("default");
+        lookup.extra.insert(
+            "min_client_version".to_string(),
+            serde_json::json!("latest"),
+        );
+        let problems = crate::validate::lookup_problems(&lookup);
+        assert!(problems.iter().any(|p| p.contains("min_client_version")));
+    }
+
+    #[test]
     fn change_detection_ignores_line_endings() {
         let dir = std::env::temp_dir().join("acl-offsetgen-lookup-test");
         std::fs::create_dir_all(&dir).expect("dir");

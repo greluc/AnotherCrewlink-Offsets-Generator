@@ -106,6 +106,145 @@ pub fn structural_problems(offsets: &Offsets) -> Vec<String> {
     problems
 }
 
+/// What the client requires of `lookup.json`, checked before it is written.
+///
+/// This file was going out unvalidated, which is the worse of the two to get
+/// wrong: an offsets file that is refused costs one game build, but a lookup
+/// that is refused costs the whole bundle. The client falls back to its cached
+/// or embedded copy and every version stops updating at once.
+///
+/// Mirrors `validateLookup` in the client. The envelope fields are optional
+/// there -- a mirror that has not published them yet is not an outage -- so
+/// they are only checked when present, which is the same rule.
+pub fn lookup_problems(lookup: &crate::lookup::Lookup) -> Vec<String> {
+    use client_contract::*;
+    let mut problems = Vec::new();
+
+    if let Some(value) = lookup.extra.get("bundle_version") {
+        match value.as_i64() {
+            None => problems.push(format!(
+                "lookup.json bundle_version is {value}, which is not an integer -- the \
+                 client rejects the bundle rather than guess"
+            )),
+            Some(number) if number < 0 => problems.push(format!(
+                "lookup.json bundle_version is {number}, which is negative"
+            )),
+            Some(_) => {}
+        }
+    }
+
+    if let Some(value) = lookup.extra.get("min_client_version") {
+        let acceptable = value.as_str().is_some_and(|text| {
+            text.split('.')
+                .next()
+                .is_some_and(|head| !head.is_empty() && head.chars().all(|c| c.is_ascii_digit()))
+        });
+        if !acceptable {
+            problems.push(format!(
+                "lookup.json min_client_version is {value}, not a dotted version string"
+            ));
+        }
+    }
+
+    for (arch, pattern) in [
+        ("x64", &lookup.patterns.x64.broadcast_version),
+        ("x86", &lookup.patterns.x86.broadcast_version),
+    ] {
+        let Some(text) = pattern.sig.as_deref() else {
+            problems.push(format!(
+                "lookup.json patterns.{arch}.broadcastVersion has no sig"
+            ));
+            continue;
+        };
+        if Pattern::parse(text).is_err() {
+            problems.push(format!(
+                "lookup.json patterns.{arch}.broadcastVersion does not parse as a pattern"
+            ));
+        }
+        if !pattern
+            .pattern_offset
+            .is_some_and(|value| (0..=MAX_PATTERN_OFFSET).contains(&value))
+        {
+            problems.push(format!(
+                "lookup.json patterns.{arch}.broadcastVersion.patternOffset is missing or \
+                 outside 0..{MAX_PATTERN_OFFSET}"
+            ));
+        }
+        if !pattern
+            .address_offset
+            .is_some_and(|value| value.abs() <= MAX_ADDRESS_OFFSET)
+        {
+            problems.push(format!(
+                "lookup.json patterns.{arch}.broadcastVersion.addressOffset is missing or \
+                 outside ±{MAX_ADDRESS_OFFSET}"
+            ));
+        }
+    }
+
+    // Every unrecognised game build falls through to `default`. Without it, an
+    // unknown build has nowhere to go at all.
+    if !lookup.versions.contains_key("default") {
+        problems.push(
+            "lookup.json has no versions.default -- every unrecognised game build falls \
+             through to it"
+                .to_string(),
+        );
+    }
+
+    for (id, entry) in &lookup.versions {
+        let Some(record) = entry.as_object() else {
+            problems.push(format!("lookup.json versions.{id} is not an object"));
+            continue;
+        };
+        if !record.get("version").is_some_and(|v| v.is_string()) {
+            problems.push(format!(
+                "lookup.json versions.{id}.version is missing or not a string"
+            ));
+        }
+        match record.get("file").and_then(|v| v.as_str()) {
+            // The client interpolates this into a URL, so a traversal or an
+            // absolute URL would redirect the fetch to a host of someone else's
+            // choosing -- a more direct route than any wrong number.
+            Some(file) if is_relative_json_path(file) => {}
+            Some(file) => problems.push(format!(
+                "lookup.json versions.{id}.file is {file:?}, which is not a relative .json path"
+            )),
+            None => problems.push(format!("lookup.json versions.{id}.file is missing")),
+        }
+        match record.get("offsetsVersion").and_then(|v| v.as_i64()) {
+            Some(value) if value >= 0 => {}
+            Some(value) => problems.push(format!(
+                "lookup.json versions.{id}.offsetsVersion is {value}, which is negative"
+            )),
+            None => problems.push(format!(
+                "lookup.json versions.{id}.offsetsVersion is missing or not an integer"
+            )),
+        }
+    }
+
+    problems
+}
+
+/// The client's `LOOKUP_FILE` shape: dot-free segments of `[A-Za-z0-9._-]`
+/// starting alphanumeric, joined by `/`, ending in `.json`.
+fn is_relative_json_path(file: &str) -> bool {
+    let Some(_) = file.strip_suffix(".json") else {
+        return false;
+    };
+    if file.is_empty() {
+        return false;
+    }
+    file.split('/').all(|segment| {
+        segment
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    })
+}
+
 /// Everything AnotherCrewLink's validator would reject the bundle for.
 ///
 /// Our other checks ask "is this right?"; this one asks "will the client take
@@ -190,19 +329,26 @@ fn check_client_contract(offsets: &Offsets, problems: &mut Vec<String>) -> usize
                 ));
             }
         }
-        let pattern_offset = signature.pattern_offset.unwrap_or(0);
-        if !(0..=MAX_PATTERN_OFFSET).contains(&pattern_offset) {
-            problems.push(format!(
-                "signatures.{name}.patternOffset is {pattern_offset}, outside \
-                 0..{MAX_PATTERN_OFFSET}"
-            ));
+        // Both must be *present*, not merely in range. An entry carrying a sig
+        // without them is rejected outright as a missing field, and defaulting
+        // to zero here would have hidden exactly that.
+        match signature.pattern_offset {
+            None => problems.push(format!(
+                "signatures.{name} has a sig but no patternOffset; the client requires both"
+            )),
+            Some(value) if !(0..=MAX_PATTERN_OFFSET).contains(&value) => problems.push(format!(
+                "signatures.{name}.patternOffset is {value}, outside 0..{MAX_PATTERN_OFFSET}"
+            )),
+            Some(_) => {}
         }
-        let address_offset = signature.address_offset.unwrap_or(0);
-        if address_offset.abs() > MAX_ADDRESS_OFFSET {
-            problems.push(format!(
-                "signatures.{name}.addressOffset is {address_offset}, outside \
-                 ±{MAX_ADDRESS_OFFSET}"
-            ));
+        match signature.address_offset {
+            None => problems.push(format!(
+                "signatures.{name} has a sig but no addressOffset; the client requires both"
+            )),
+            Some(value) if value.abs() > MAX_ADDRESS_OFFSET => problems.push(format!(
+                "signatures.{name}.addressOffset is {value}, outside ±{MAX_ADDRESS_OFFSET}"
+            )),
+            Some(_) => {}
         }
     }
 

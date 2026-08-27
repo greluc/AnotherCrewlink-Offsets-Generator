@@ -353,6 +353,13 @@ fn generate(args: GenerateArgs) -> Result<()> {
         return Ok(());
     }
 
+    // The lookup is the more expensive of the two to get wrong: a refused
+    // offsets file costs one game build, a refused lookup costs the bundle.
+    let lookup_problems = validate::lookup_problems(&lookup);
+    if !lookup_problems.is_empty() {
+        return Err(Error::Validation(lookup_problems));
+    }
+
     write_file(&offsets_path, &rendered)?;
     write_file(&lookup_path, &lookup.to_json()?)?;
     println!("\nwrote {}", offsets_path.display());
