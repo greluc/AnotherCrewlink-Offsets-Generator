@@ -167,36 +167,43 @@ impl Lookup {
         Ok(())
     }
 
-    /// Sorted newest-first, with `default` on top, so the file reads like a
-    /// changelog and diffs stay local.
+    /// Numeric keys ascending, then everything else -- which is the order a
+    /// JavaScript round trip produces, whether we like it or not.
+    ///
+    /// `lookup.json` is also written by the sync workflow, in Node. V8 orders
+    /// integer-like own properties numerically ahead of string keys, so
+    /// `JSON.parse` reorders the file before anything is even changed: broadcast
+    /// versions come out ascending and `default` lands at the end. This used to
+    /// emit the opposite -- newest first, `default` on top, which read nicely --
+    /// and the two tools then rewrote each other's ordering on every run, 118
+    /// lines of churn per pull request hiding whatever actually changed.
+    ///
+    /// JavaScript's ordering is forced by the language and ours was a
+    /// preference, so ours yields. A diff worth reading beats a file that reads
+    /// like a changelog.
     pub fn to_json(&self) -> Result<String> {
         let mut ordered = serde_json::Map::new();
-        if let Some(default) = self.versions.get("default") {
-            ordered.insert("default".to_string(), default.clone());
-        }
+
         let mut numeric: Vec<(i64, String)> = self
             .versions
             .keys()
-            .filter(|key| key.as_str() != "default")
             .filter_map(|key| key.parse::<i64>().ok().map(|number| (number, key.clone())))
             .collect();
-        numeric.sort_by_key(|(number, _)| std::cmp::Reverse(*number));
+        numeric.sort_by_key(|(number, _)| *number);
         for (_, key) in numeric {
             if let Some(value) = self.versions.get(&key) {
                 ordered.insert(key, value.clone());
             }
         }
-        // Anything non-numeric that we did not recognise is kept rather than
-        // dropped; losing a hand-added key would be worse than odd ordering.
-        let mut leftovers: Vec<&String> = self
-            .versions
-            .keys()
-            .filter(|key| key.as_str() != "default" && key.parse::<i64>().is_err())
-            .collect();
-        leftovers.sort();
-        for key in leftovers {
-            if let Some(value) = self.versions.get(key) {
-                ordered.insert(key.clone(), value.clone());
+
+        // Non-numeric keys keep their existing relative order, which is what V8
+        // does with string properties. `default` is normally the only one, but
+        // a hand-added key is carried rather than dropped.
+        for key in self.versions.keys() {
+            if key.parse::<i64>().is_err() {
+                if let Some(value) = self.versions.get(key) {
+                    ordered.insert(key.clone(), value.clone());
+                }
             }
         }
 
@@ -389,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn rendering_sorts_newest_first_and_keeps_unknown_keys() {
+    fn rendering_matches_the_order_a_javascript_round_trip_produces() {
         let mut lookup = lookup_with(&[
             ("50607250", "V2024.8.13", "V2024.8.13/offsets.json", 15),
             ("50656300", "V17.4.0", "V17.4.0/offsets.json", 5),
@@ -400,10 +407,16 @@ mod tests {
         );
         lookup.refresh_default().expect("default");
         let json = lookup.to_json().expect("render");
-        let default_at = json.find("\"default\"").expect("default present");
-        let newest_at = json.find("\"50656300\"").expect("newest present");
         let oldest_at = json.find("\"50607250\"").expect("oldest present");
-        assert!(default_at < newest_at && newest_at < oldest_at);
+        let newest_at = json.find("\"50656300\"").expect("newest present");
+        let default_at = json.find("\"default\"").expect("default present");
+        // Numeric keys ascending, then the string keys -- exactly what V8 gives
+        // the sync workflow when it parses this file. Emitting anything else
+        // means the two tools rewrite each other on every run.
+        assert!(
+            oldest_at < newest_at && newest_at < default_at,
+            "expected ascending numeric keys followed by default"
+        );
         assert!(json.contains("\"notes\""));
     }
 
