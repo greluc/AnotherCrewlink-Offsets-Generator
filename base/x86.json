@@ -19,12 +19,23 @@
   "nativeRigidbodyPositionX": 124,
 
   "_serverManagerTail": [
-    "Chain after static_fields: singleton slot, then ServerManager's current",
-    "region, then the field the client reads off it. Carried verbatim from the",
-    "working hand-written offsets -- it walks a generic singleton base whose",
-    "static layout a dump does not spell out."
+    "static_fields -> singleton -> ServerManager.<CurrentRegion> -> its <Name>.",
+    "",
+    "Read out of the running game on 2026-08-24. The carried value started at",
+    "static_fields + 4, which is null in this build: the ServerManager instance",
+    "sits at + 8. Walked live, [4, 20, 8] yields an empty string and [8, 20, 8]",
+    "yields \"Europe\". The instance at + 8 is the coherent one -- its",
+    "CurrentUdpServer is matchmaker-eu.among.us, matching that region. The slot",
+    "at + 0 also reads \"Europe\" if treated as the instance, but it is the",
+    "DefaultRegions array and its CurrentUdpServer says \"Asia\".",
+    "",
+    "x64 needed the same correction, and lands on the same rule: the instance is",
+    "two pointers into static_fields, not one. 20 is",
+    "ServerManager.<CurrentRegion> and 8 is StaticRegionInfo.<Name>, both from",
+    "the dump -- only the first hop needed the game, because the instance",
+    "belongs to a generic base class whose statics live elsewhere."
   ],
-  "serverManagerTail": [4, 20, 8],
+  "serverManagerTail": [8, 20, 8],
 
   "_playerControlGameOptionsTail": [
     "Vestigial. The client stopped reading playerControl_GameOptions when",
