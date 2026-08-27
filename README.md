@@ -118,6 +118,13 @@ cargo run --release -- verify --game "<Among Us folder>" --offsets ../AnotherCre
 
 The dump is cached under `work/dumps/<version>-<arch>`; `--force-dump` redoes it.
 
+`lookup.json` is authored by more than this tool -- the sync workflow records
+`upstream_commit`, and the client reads `bundle_version` for replay detection
+and `min_client_version` to refuse a bundle it is too old for. Keys the
+generator does not model are carried through untouched, and `bundle_version`
+advances whenever the generator changes the bundle, because the client keeps the
+highest it has seen and refuses anything lower.
+
 ## Supply chain
 
 The generator is a build tool for files that end up on every user's machine, so
@@ -168,7 +175,7 @@ the declared one was wrong until that job existed.
 
 ## Regression testing
 
-Ninety-six tests, none of which need Among Us installed.
+Ninety-eight tests, none of which need Among Us installed.
 
 The signature generator is tested end to end against a synthetic PE built in the
 test: several instructions reference the same slot, one is followed by identical

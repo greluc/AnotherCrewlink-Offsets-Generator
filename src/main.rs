@@ -334,6 +334,20 @@ fn generate(args: GenerateArgs) -> Result<()> {
         }
     );
 
+    // The client keeps the highest bundle_version it has seen and refuses
+    // anything lower, so it has to advance whenever the bundle does. Publishing
+    // changed offsets under an unchanged bundle_version would leave the
+    // pre-change bundle replayable with nothing to tell the two apart.
+    if change != ContentChange::Identical {
+        match lookup.bump_bundle_version() {
+            Some(version) => println!("bundle version -> {version}"),
+            None => println!(
+                "note: lookup.json carries no bundle_version, so replay detection is not \
+                 in play for this bundle"
+            ),
+        }
+    }
+
     if args.dry_run {
         println!("\ndry run: nothing written");
         return Ok(());

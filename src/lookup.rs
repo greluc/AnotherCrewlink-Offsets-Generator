@@ -22,11 +22,24 @@ use crate::offsets::Signature;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lookup {
+    /// Top-level keys this generator does not model, kept verbatim.
+    ///
+    /// `lookup.json` is authored by more than this tool. The sync workflow adds
+    /// `upstream_commit`, and the client reads `bundle_version` for replay
+    /// detection and `min_client_version` to refuse a bundle it is too old for.
+    /// Deserialising into a struct that only knew `patterns` and `versions`
+    /// would have dropped all three the next time the generator wrote the file
+    /// -- silently, and taking the client's rollback protection with it.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
     #[serde(rename = "patterns")]
     pub patterns: Patterns,
     #[serde(rename = "versions")]
     pub versions: serde_json::Map<String, serde_json::Value>,
 }
+
+/// Key the client uses to reject a replayed older bundle.
+const BUNDLE_VERSION: &str = "bundle_version";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Patterns {
@@ -188,12 +201,36 @@ impl Lookup {
         }
 
         let rendered = Lookup {
+            extra: self.extra.clone(),
             patterns: self.patterns.clone(),
             versions: ordered,
         };
         serde_json::to_string_pretty(&rendered)
             .map(|text| text + "\n")
             .map_err(|error| Error::malformed(format!("cannot render lookup.json: {error}")))
+    }
+
+    /// Current `bundle_version`, if the file carries one.
+    pub fn bundle_version(&self) -> Option<i64> {
+        self.extra
+            .get(BUNDLE_VERSION)
+            .and_then(|value| value.as_i64())
+    }
+
+    /// Moves `bundle_version` on, so a client cannot be handed the previous
+    /// bundle in place of this one.
+    ///
+    /// The client keeps the highest version it has seen and rejects anything
+    /// lower, so this has to advance whenever the contents do. Leaving it alone
+    /// after changing an offsets file would let the pre-change bundle be
+    /// replayed at a client that had already accepted the new one, with nothing
+    /// to tell them apart. Only called when something actually changed, so a
+    /// rerun that produces identical output does not churn it.
+    pub fn bump_bundle_version(&mut self) -> Option<i64> {
+        let next = self.bundle_version()? + 1;
+        self.extra
+            .insert(BUNDLE_VERSION.to_string(), serde_json::json!(next));
+        Some(next)
     }
 
     pub fn lookup_entry(&self, broadcast_version: i32) -> Option<VersionEntry> {
@@ -252,6 +289,7 @@ mod tests {
             );
         }
         Lookup {
+            extra: serde_json::Map::new(),
             patterns: Patterns {
                 x64: BroadcastPattern {
                     broadcast_version: signature.clone(),
@@ -367,6 +405,52 @@ mod tests {
         let oldest_at = json.find("\"50607250\"").expect("oldest present");
         assert!(default_at < newest_at && newest_at < oldest_at);
         assert!(json.contains("\"notes\""));
+    }
+
+    #[test]
+    fn unknown_top_level_keys_survive_a_round_trip() {
+        // lookup.json is authored by more than this tool: the sync workflow adds
+        // upstream_commit, and the client reads bundle_version and
+        // min_client_version. Dropping them on write would take the client's
+        // replay protection with them.
+        let source = r#"{
+  "bundle_version": 7,
+  "min_client_version": "1.0.0",
+  "upstream_commit": "abc123",
+  "patterns": {
+    "x64": { "broadcastVersion": { "sig": "33 D2", "patternOffset": 3, "addressOffset": 0 } },
+    "x86": { "broadcastVersion": { "sig": "6A 00", "patternOffset": 3, "addressOffset": 0 } }
+  },
+  "versions": {
+    "default": { "version": "V1", "file": "V1/offsets.json", "offsetsVersion": 1 },
+    "100": { "version": "V1", "file": "V1/offsets.json", "offsetsVersion": 1 }
+  }
+}"#;
+        let lookup: Lookup = serde_json::from_str(source).expect("parse");
+        assert_eq!(lookup.bundle_version(), Some(7));
+
+        let rendered = lookup.to_json().expect("render");
+        let back: serde_json::Value = serde_json::from_str(&rendered).expect("reparse");
+        assert_eq!(back["bundle_version"], 7);
+        assert_eq!(back["min_client_version"], "1.0.0");
+        assert_eq!(back["upstream_commit"], "abc123");
+        assert!(back["patterns"].is_object());
+        assert_eq!(back["versions"].as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn bundle_version_only_moves_forward() {
+        let mut lookup = lookup_with(&[]);
+        // Absent: nothing to bump, and nothing invented.
+        assert_eq!(lookup.bundle_version(), None);
+        assert_eq!(lookup.bump_bundle_version(), None);
+
+        lookup
+            .extra
+            .insert("bundle_version".to_string(), serde_json::json!(4));
+        assert_eq!(lookup.bump_bundle_version(), Some(5));
+        assert_eq!(lookup.bump_bundle_version(), Some(6));
+        assert_eq!(lookup.bundle_version(), Some(6));
     }
 
     #[test]
