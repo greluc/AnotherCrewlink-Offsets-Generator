@@ -77,10 +77,18 @@ unnoticed.
 
 **Nothing checked the output.** A failed lookup wrote `-1` into the published
 file and printed a line nobody read. Now a failed lookup fails the run, and
-before anything is written the result goes through 198 checks: no unresolved
+before anything is written the result goes through ~270 checks: no unresolved
 values, chain shapes consistent, the player struct's size matching
 `bufferLength`, and every signature scanned for and resolved against the binary.
 If a check fails, nothing is written.
+
+Part of that gate mirrors the client's own contract. AnotherCrewLink validates
+every bundle it fetches in `src/main/offsetsValidator.ts`, and a rejected bundle
+does not merely look wrong -- it does not arrive, because the client falls back
+to a cached or embedded one. Those bounds are duplicated in `validate.rs` under
+`client_contract`, deliberately rather than approximately, so a file the client
+would refuse fails here instead of at the far end of a fetch on someone else's
+machine. If the client moves a bound, that module is what has to follow.
 
 Some smaller things that were also wrong: the version search read a fixed byte
 window that Unity 2022.3 moved out from under it (the string sits at 0x7A8 now,
@@ -175,7 +183,7 @@ the declared one was wrong until that job existed.
 
 ## Regression testing
 
-Ninety-eight tests, none of which need Among Us installed.
+One hundred and five tests, none of which need Among Us installed.
 
 The signature generator is tested end to end against a synthetic PE built in the
 test: several instructions reference the same slot, one is followed by identical

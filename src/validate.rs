@@ -22,6 +22,44 @@ use crate::siggen::SignatureGenerator;
 /// millions means an address leaked into a field slot.
 const MAX_PLAUSIBLE_OFFSET: i64 = 65_536;
 
+/// The bounds AnotherCrewLink's own validator enforces, mirrored here.
+///
+/// `src/main/offsetsValidator.ts` rejects a bundle that breaks any of these, and
+/// a rejected bundle means the client falls back to a cached or embedded one --
+/// so a file that trips a rule is not merely imperfect, it does not arrive.
+/// Better to fail here, where the run stops and nothing is published, than at
+/// the far end of a fetch on someone else's machine.
+///
+/// These are copied deliberately rather than approximated. If the client
+/// loosens or tightens one, this is the place that has to follow.
+mod client_contract {
+    /// Widest module-relative address a chain step may name.
+    pub const MAX_MODULE_RVA: i64 = 0x2000_0000;
+    /// -1 means "not present on this build"; anything lower is not data.
+    pub const MIN_CHAIN_VALUE: i64 = -1;
+    pub const MAX_CHAIN_LENGTH: usize = 16;
+    pub const MIN_BUFFER_LENGTH: i64 = 8;
+    pub const MAX_BUFFER_LENGTH: i64 = 4096;
+    pub const MAX_SIGNATURE_TOKENS: usize = 256;
+    pub const MAX_PATTERN_OFFSET: i64 = 256;
+    pub const MAX_ADDRESS_OFFSET: i64 = 64;
+    /// Member types `structron` understands, as the client lists them.
+    pub const STRUCT_TYPES: [&str; 12] = [
+        "INT",
+        "INT_BE",
+        "UINT",
+        "UINT_BE",
+        "SHORT",
+        "SHORT_BE",
+        "USHORT",
+        "USHORT_BE",
+        "FLOAT",
+        "CHAR",
+        "BYTE",
+        "SKIP",
+    ];
+}
+
 pub struct Report {
     pub problems: Vec<String>,
     /// Things that are not wrong but that a maintainer should see. A stale
@@ -45,6 +83,7 @@ pub fn validate(offsets: &Offsets, image: &Image, types: &TypeInfoTable) -> Repo
     checks += check_no_sentinels(offsets, &mut problems);
     checks += check_chain_shapes(offsets, &mut problems);
     checks += check_player_struct(offsets, &mut problems);
+    checks += check_client_contract(offsets, &mut problems);
     checks += check_signatures(offsets, image, types, &mut problems);
     checks += check_write_path(offsets, image, &mut problems, &mut warnings);
 
@@ -63,7 +102,149 @@ pub fn structural_problems(offsets: &Offsets) -> Vec<String> {
     check_no_sentinels(offsets, &mut problems);
     check_chain_shapes(offsets, &mut problems);
     check_player_struct(offsets, &mut problems);
+    check_client_contract(offsets, &mut problems);
     problems
+}
+
+/// Everything AnotherCrewLink's validator would reject the bundle for.
+///
+/// Our other checks ask "is this right?"; this one asks "will the client take
+/// it at all?". They overlap but are not the same question, and this one has a
+/// definite answer we can check rather than judge.
+fn check_client_contract(offsets: &Offsets, problems: &mut Vec<String>) -> usize {
+    use client_contract::*;
+
+    let mut checks = 0;
+    let json = match serde_json::to_value(offsets) {
+        Ok(value) => value,
+        Err(error) => {
+            problems.push(format!("offsets could not be serialised: {error}"));
+            return 1;
+        }
+    };
+
+    // Chains: length, and every step inside the module.
+    if let serde_json::Value::Object(root) = &json {
+        for (key, value) in root {
+            collect_chains(key, value, &mut |path, steps| {
+                checks += 1;
+                if steps.len() > MAX_CHAIN_LENGTH {
+                    problems.push(format!(
+                        "{path} has {} steps; the client rejects anything past {MAX_CHAIN_LENGTH}",
+                        steps.len()
+                    ));
+                }
+                for (index, step) in steps.iter().enumerate() {
+                    if *step < MIN_CHAIN_VALUE || *step > MAX_MODULE_RVA {
+                        problems.push(format!(
+                            "{path}[{index}] is {step}, outside the {MIN_CHAIN_VALUE}..\
+                             0x{MAX_MODULE_RVA:X} the client accepts"
+                        ));
+                    }
+                }
+            });
+        }
+    }
+
+    checks += 1;
+    let buffer = offsets.player.buffer_length;
+    if !(MIN_BUFFER_LENGTH..=MAX_BUFFER_LENGTH).contains(&buffer) {
+        problems.push(format!(
+            "player.bufferLength is {buffer}, outside the \
+             {MIN_BUFFER_LENGTH}..{MAX_BUFFER_LENGTH} the client accepts -- it sizes an \
+             allocation in GameReader"
+        ));
+    }
+
+    for member in &offsets.player.struct_layout {
+        checks += 1;
+        if !STRUCT_TYPES.contains(&member.kind.as_str()) {
+            problems.push(format!(
+                "player.struct member '{}' has type '{}', which structron does not know",
+                member.name, member.kind
+            ));
+        }
+    }
+
+    for (name, signature) in signature_entries(offsets) {
+        checks += 1;
+        // An empty entry is legal: the x64 files carry no write-path patterns.
+        let Some(text) = signature.sig.as_deref() else {
+            continue;
+        };
+        let tokens: Vec<&str> = text.split_whitespace().collect();
+        if tokens.is_empty() || tokens.len() > MAX_SIGNATURE_TOKENS {
+            problems.push(format!(
+                "signatures.{name} has {} tokens; the client accepts 1..{MAX_SIGNATURE_TOKENS}",
+                tokens.len()
+            ));
+        }
+        for (index, token) in tokens.iter().enumerate() {
+            let valid = *token == "?"
+                || *token == "??"
+                || (token.len() == 2 && token.chars().all(|c| c.is_ascii_hexdigit()));
+            if !valid {
+                problems.push(format!(
+                    "signatures.{name} token {index} is {token:?}; the client accepts a hex \
+                     pair or a wildcard"
+                ));
+            }
+        }
+        let pattern_offset = signature.pattern_offset.unwrap_or(0);
+        if !(0..=MAX_PATTERN_OFFSET).contains(&pattern_offset) {
+            problems.push(format!(
+                "signatures.{name}.patternOffset is {pattern_offset}, outside \
+                 0..{MAX_PATTERN_OFFSET}"
+            ));
+        }
+        let address_offset = signature.address_offset.unwrap_or(0);
+        if address_offset.abs() > MAX_ADDRESS_OFFSET {
+            problems.push(format!(
+                "signatures.{name}.addressOffset is {address_offset}, outside \
+                 ±{MAX_ADDRESS_OFFSET}"
+            ));
+        }
+    }
+
+    checks
+}
+
+/// Every `[i64]` array in the document, with its path.
+fn collect_chains(path: &str, value: &serde_json::Value, visit: &mut impl FnMut(&str, &[i64])) {
+    match value {
+        serde_json::Value::Array(items) => {
+            let steps: Vec<i64> = items.iter().filter_map(serde_json::Value::as_i64).collect();
+            if steps.len() == items.len() {
+                visit(path, &steps);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                collect_chains(&format!("{path}.{key}"), child, visit);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn signature_entries(offsets: &Offsets) -> Vec<(&'static str, &Signature)> {
+    let s = &offsets.signatures;
+    vec![
+        ("innerNetClient", &s.inner_net_client),
+        ("meetingHud", &s.meeting_hud),
+        ("gameData", &s.game_data),
+        ("shipStatus", &s.ship_status),
+        ("miniGame", &s.mini_game),
+        ("palette", &s.palette),
+        ("playerControl", &s.player_control),
+        ("serverManager", &s.server_manager),
+        ("gameOptionsManager", &s.game_options_manager),
+        ("showModStamp", &s.show_mod_stamp),
+        ("connectFunc", &s.connect_func),
+        ("fixedUpdateFunc", &s.fixed_update_func),
+        ("pingMessageString", &s.ping_message_string),
+        ("modLateUpdate", &s.mod_late_update),
+    ]
 }
 
 /// No unresolved values anywhere. Slot 0 of a signature-backed chain is the one
@@ -608,6 +789,83 @@ mod tests {
         check_player_struct(&offsets, &mut problems);
         assert_eq!(problems.len(), 1);
         assert!(problems[0].contains("bufferLength"));
+    }
+
+    #[test]
+    fn a_clean_file_satisfies_the_client_contract() {
+        let mut problems = Vec::new();
+        check_client_contract(&minimal_offsets(), &mut problems);
+        assert!(problems.is_empty(), "unexpected: {problems:?}");
+    }
+
+    #[test]
+    fn a_chain_step_below_minus_one_is_caught() {
+        // The client treats -1 as "not present on this build" and rejects
+        // anything lower. Our own sentinel check exempts slot 0 entirely, so
+        // without this rule a -2 there would pass here and be refused at the
+        // far end of a fetch.
+        let mut offsets = minimal_offsets();
+        offsets.meeting_hud = vec![-2, 92, 0];
+        let mut problems = Vec::new();
+        check_client_contract(&offsets, &mut problems);
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].contains("outside the -1"));
+    }
+
+    #[test]
+    fn an_absurd_buffer_length_is_caught() {
+        let mut offsets = minimal_offsets();
+        offsets.player.buffer_length = 100_000;
+        let mut problems = Vec::new();
+        check_client_contract(&offsets, &mut problems);
+        assert!(problems.iter().any(|p| p.contains("bufferLength")));
+    }
+
+    #[test]
+    fn an_address_offset_past_the_clients_bound_is_caught() {
+        // addressOffset steers where a pattern match turns into an address, so
+        // the client bounds it tightly. A generator that emitted 128 would
+        // produce a file nobody could use.
+        let mut offsets = minimal_offsets();
+        offsets.signatures.palette.address_offset = Some(128);
+        let mut problems = Vec::new();
+        check_client_contract(&offsets, &mut problems);
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].contains("addressOffset"));
+    }
+
+    #[test]
+    fn a_malformed_signature_token_is_caught() {
+        let mut offsets = minimal_offsets();
+        offsets.signatures.game_data.sig = Some("8B 0D ZZ ? ?".to_string());
+        let mut problems = Vec::new();
+        check_client_contract(&offsets, &mut problems);
+        assert!(problems
+            .iter()
+            .any(|p| p.contains("hex pair or a wildcard")));
+    }
+
+    #[test]
+    fn an_unknown_struct_member_type_is_caught() {
+        let mut offsets = minimal_offsets();
+        offsets.player.struct_layout[1].kind = "QUADWORD".to_string();
+        let mut problems = Vec::new();
+        check_client_contract(&offsets, &mut problems);
+        assert!(problems
+            .iter()
+            .any(|p| p.contains("structron does not know")));
+    }
+
+    #[test]
+    fn an_empty_signature_entry_is_accepted() {
+        // 90 of the 616 signature entries in the real corpus are {} -- the x64
+        // files carry no write-path patterns. Rejecting those would reject every
+        // 64-bit file the project has shipped.
+        let mut offsets = minimal_offsets();
+        offsets.signatures.show_mod_stamp = Signature::default();
+        let mut problems = Vec::new();
+        check_client_contract(&offsets, &mut problems);
+        assert!(problems.is_empty(), "unexpected: {problems:?}");
     }
 
     #[test]
