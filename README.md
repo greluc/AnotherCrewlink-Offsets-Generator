@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="acl-offsetgen" width="96">
+</p>
+
 # acl-offsetgen
 
 Generates the memory offsets and byte signatures [AnotherCrewLink](https://github.com/greluc/AnotherCrewLink)
